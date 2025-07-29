@@ -24,7 +24,7 @@ import {
 import { getDirFilenamesSync } from '@beenotung/tslib/fs'
 import { copyFile, writeFile } from 'fs/promises'
 import { extract_lines } from '@beenotung/tslib/string'
-import { zipArray } from '@beenotung/tslib'
+import { zipArray } from '@beenotung/tslib/array'
 import {
   getPreviewPathsAndBase64,
   getPreviewBase64ArrForOneGroup,
