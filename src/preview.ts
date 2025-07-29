@@ -1,5 +1,4 @@
-import { mkdirSync } from 'fs'
-import { extname, basename, join } from 'path'
+import { basename, join } from 'path'
 import { DetectYamlOptions, PoseYamlOptions } from './yaml'
 import {
   BoundingBox,
@@ -8,12 +7,7 @@ import {
 } from './label'
 import { drawBox } from './canvas'
 import { createCanvas, loadImage } from 'canvas'
-import { writeFile } from 'fs/promises'
-import { DatasetOptions, BoundingBoxGroups, ImageLabelDict } from './fs'
-
-// export type PreviewPathImagePair = {
-//   [preview_path: string]: string
-// }
+import { DatasetOptions, ImageLabelDict } from './fs'
 
 type PreviewBase64Pair = {
   preview_path_arr: string[]
