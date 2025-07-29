@@ -5,7 +5,7 @@ import {
   PoseYamlOptions,
   parseDataYaml,
   toDataYamlString,
-} from './dataset/yaml'
+} from './yaml'
 import {
   BoundingBox,
   BoundingBoxWithKeypoints,
@@ -14,7 +14,7 @@ import {
   ParsePoseLabelOptions,
   toPoseLabelString,
   toDetectLabelString,
-} from './dataset/label'
+} from './label'
 import { getDirFilenamesSync } from '@beenotung/tslib/fs'
 import { writeFile } from 'fs/promises'
 import { extract_lines } from '@beenotung/tslib/string'
@@ -23,7 +23,7 @@ import {
   getPreviewPathsAndBase64,
   getPreviewBase64ArrForOneGroup,
   getOnePreviewBase64FromBoxes as getOnePreviewBase64FromBoxes,
-} from './dataset/preview'
+} from './preview'
 
 export function validateDatasetDir(
   dataset_dir: string,
