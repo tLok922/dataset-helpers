@@ -29,7 +29,7 @@ type PreviewBase64PairByGroup = {
 export async function getPreviewPathsAndBase64(
   options: DatasetOptions,
 ): Promise<PreviewBase64PairByGroup> {
-  const { dir, task, metadata, bounding_box_groups } = options
+  const { dataset_dir, task, metadata, bounding_box_groups } = options
 
   const group_types: Array<keyof PreviewBase64PairByGroup> = [
     'train',
@@ -42,7 +42,7 @@ export async function getPreviewPathsAndBase64(
   for (const group_type of group_types) {
     preview_path_base64_groups[group_type] =
       await getPreviewBase64ArrForOneGroup(task, {
-        dir,
+        dataset_dir,
         group_type,
         bounding_box_dict: bounding_box_groups[group_type],
         metadata,
@@ -58,20 +58,25 @@ export async function getPreviewBase64ArrForOneGroup<
 >(
   task: 'detect' | 'pose',
   options: {
-    dir: string
+    dataset_dir: string
     group_type: string
     bounding_box_dict: ImageLabelDict<BoundingBox | BoundingBoxWithKeypoints>
     metadata: T
   },
 ): Promise<PreviewBase64Pair> {
-  const { dir, group_type, bounding_box_dict, metadata } = options
-  const preview_dir_path = join(dir, group_type, 'previews')
+  const { dataset_dir, group_type, bounding_box_dict, metadata } = options
+  const preview_dir_path = join(dataset_dir, group_type, 'previews')
 
   const preview_path_arr: string[] = []
   const base64_arr: string[] = []
 
   for (const image_filename in bounding_box_dict) {
-    const image_full_path = join(dir, group_type, 'images', image_filename)
+    const image_full_path = join(
+      dataset_dir,
+      group_type,
+      'images',
+      image_filename,
+    )
     const base64 = await getOnePreviewBase64FromBoxes(task, {
       image_full_path,
       metadata,

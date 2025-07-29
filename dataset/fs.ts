@@ -1,4 +1,10 @@
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'fs'
+import {
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+  copyFileSync,
+} from 'fs'
 import { extname, basename, join } from 'path'
 import {
   DetectYamlOptions,
@@ -16,7 +22,7 @@ import {
   toDetectLabelString,
 } from './label'
 import { getDirFilenamesSync } from '@beenotung/tslib/fs'
-import { writeFile } from 'fs/promises'
+import { copyFile, writeFile } from 'fs/promises'
 import { extract_lines } from '@beenotung/tslib/string'
 import { zipArray } from '@beenotung/tslib'
 import {
@@ -52,17 +58,18 @@ export function getImagePaths(dir: string, group: string): string[] {
 }
 
 export function getLabelPaths(
-  dir: string,
+  dataset_dir: string,
   group: string,
   image_paths: string[],
 ): string[] {
-  return getDirFilenamesSync(join(dir, group, 'labels')).filter(label_file => {
+  const labels_dir = join(dataset_dir, group, 'labels')
+  return getDirFilenamesSync(labels_dir).filter(label_file => {
     const label_name = basename(label_file, extname(label_file))
     const match = image_paths.some(
       image => basename(image, extname(image)) === label_name,
     )
     if (!match) {
-      throw new Error(`Error: Label missing for ${label_file}`)
+      throw new Error(`Error: image missing for ${labels_dir}/${label_file}`)
     }
     return true
   })
@@ -172,7 +179,7 @@ export async function getBoundingBoxesDict<
 >(
   task: 'detect' | 'pose',
   options: {
-    dir: string
+    dataset_dir: string
     group_type: string
     image_paths: string[]
     label_paths: string[]
@@ -180,27 +187,27 @@ export async function getBoundingBoxesDict<
     missing_labels?: 'error' | 'warn' | 'ignore'
   },
 ): Promise<ImageLabelDict> {
-  const { dir, group_type, metadata, missing_labels = 'warn' } = options
+  const { dataset_dir, group_type, metadata, missing_labels = 'warn' } = options
 
   const { validated_image_paths, validated_label_paths } =
     getValidatedImageAndLabels({
       ...options,
       missing_labels,
-      image_dir: join(dir, group_type, 'images'),
-      label_dir: join(dir, group_type, 'labels'),
+      image_dir: join(dataset_dir, group_type, 'images'),
+      label_dir: join(dataset_dir, group_type, 'labels'),
     })
 
   const bounding_box_dict: ImageLabelDict = {}
 
   for (let i = 0; i < validated_image_paths.length; i++) {
     const image_full_path = join(
-      dir,
+      dataset_dir,
       group_type,
       'images',
       validated_image_paths[i],
     )
     const label_full_path = join(
-      dir,
+      dataset_dir,
       group_type,
       'labels',
       validated_label_paths[i],
@@ -248,14 +255,14 @@ export async function getBoundingBoxesOfOneLabel<
 
 // ==================== Generate Preview Image ====================
 export async function createPreviewImages(options: DatasetOptions) {
-  const { dir } = options
+  const { dataset_dir } = options
   const preview_path_base64_pair_groups =
     await getPreviewPathsAndBase64(options)
   const group_types = ['train', 'test', 'val'] satisfies Array<
     keyof BoundingBoxGroups
   >
   for (const group_type of group_types) {
-    mkdirSync(join(dir, group_type, 'previews'), { recursive: true })
+    mkdirSync(join(dataset_dir, group_type, 'previews'), { recursive: true })
     for (const [preview_path, base64] of zipArray(
       preview_path_base64_pair_groups[group_type].preview_path_arr,
       preview_path_base64_pair_groups[group_type].base64_arr,
@@ -282,7 +289,7 @@ export async function createPreviewImagesForOneGroup<
   mkdirSync(preview_dir_path, { recursive: true }) //refactor
 
   const result = await getPreviewBase64ArrForOneGroup(task, {
-    dir: preview_dir_path,
+    dataset_dir: preview_dir_path,
     group_type,
     metadata,
     bounding_box_dict,
@@ -354,7 +361,7 @@ export function saveJsonFile(
 export type DatasetOptions = DetectDatasetOptions | PoseDatasetOptions
 
 type BaseDatasetOptions = {
-  dir: string
+  dataset_dir: string
 }
 export type DetectDatasetOptions = BaseDatasetOptions & {
   task: 'detect'
@@ -380,39 +387,39 @@ export type ImageLabelDict<Box = BoundingBox> = {
 // ==================== Dataset Import (From specified directory) ====================
 // returns metadata & train/test/val bounding boxes dicts
 export async function importDataset(options: {
-  dir: string
+  dataset_dir: string
   task: 'detect'
   yaml_filename?: string
-}): Promise<Omit<DetectDatasetOptions, 'dir' | 'task'>>
+}): Promise<Omit<DetectDatasetOptions, 'dataset_dir' | 'task'>>
 export async function importDataset(options: {
-  dir: string
+  dataset_dir: string
   task: 'pose'
   yaml_filename?: string
-}): Promise<Omit<PoseDatasetOptions, 'dir' | 'task'>>
+}): Promise<Omit<PoseDatasetOptions, 'dataset_dir' | 'task'>>
 export async function importDataset(options: {
-  dir: string
+  dataset_dir: string
   task: 'detect' | 'pose'
   yaml_filename?: string
-}): Promise<Omit<DatasetOptions, 'dir' | 'task'>> {
-  const { dir, task } = options
+}): Promise<Omit<DatasetOptions, 'dataset_dir' | 'task'>> {
+  const { dataset_dir, task } = options
   const yaml_filename = options.yaml_filename ?? 'data.yaml'
-  validateDatasetDir(dir, yaml_filename)
+  validateDatasetDir(dataset_dir, yaml_filename)
 
-  const path = join(dir, yaml_filename)
+  const path = join(dataset_dir, yaml_filename)
   const yaml_content = readFileSync(path, 'utf-8')
   const metadata = parseDataYaml(task, yaml_content)
 
   const bounding_box_dicts = []
 
   for (const group_type of ['train', 'test', 'val']) {
-    const image_paths = getImagePaths(dir, group_type)
-    const label_paths = getLabelPaths(dir, group_type, image_paths)
+    const image_paths = getImagePaths(dataset_dir, group_type)
+    const label_paths = getLabelPaths(dataset_dir, group_type, image_paths)
     const bounding_box_dict = await getBoundingBoxesDict(task, {
-      dir,
+      dataset_dir,
       group_type,
       image_paths,
       label_paths,
-      metadata: metadata,
+      metadata,
     })
     bounding_box_dicts.push(bounding_box_dict)
   }
@@ -437,11 +444,18 @@ export async function importDataset(options: {
 }
 
 // ==================== Dataset Export (To specified directory) ====================
-export async function exportDataset(options: DatasetOptions): Promise<void> {
-  const { dir, task, metadata } = options
-  createExportDatasetDirs(dir)
+export type ExportDatasetOptions = DatasetOptions & {
+  import_dataset_dir: string
+}
+export async function exportDataset(
+  options: ExportDatasetOptions,
+): Promise<void> {
+  const { task, metadata } = options
+  const export_dataset_dir = options.dataset_dir
+  const import_dataset_dir = options.import_dataset_dir
+  createExportDatasetDirs(export_dataset_dir)
 
-  const yaml_path = join(dir, 'data.yaml')
+  const yaml_path = join(export_dataset_dir, 'data.yaml')
   const yaml_str = toDataYamlString(task, metadata)
   await writeFile(yaml_path, yaml_str)
 
@@ -451,25 +465,28 @@ export async function exportDataset(options: DatasetOptions): Promise<void> {
 
   for (const group_type of groups) {
     const task = options.task
+
     switch (options.task) {
       case 'detect': {
         const { metadata } = options
-        await saveLabelFiles(
-          options.dir,
+        await saveLabelFiles({
+          export_dataset_dir,
+          import_dataset_dir,
           group_type,
-          options.bounding_box_groups[group_type],
-          box => toDetectLabelString({ ...box, ...metadata }),
-        )
+          dict: options.bounding_box_groups[group_type],
+          toLabelString: box => toDetectLabelString({ ...box, ...metadata }),
+        })
         break
       }
       case 'pose': {
         const { metadata } = options
-        await saveLabelFiles(
-          options.dir,
+        await saveLabelFiles({
+          export_dataset_dir,
+          import_dataset_dir,
           group_type,
-          options.bounding_box_groups[group_type],
-          box => toPoseLabelString({ ...box, ...metadata }),
-        )
+          dict: options.bounding_box_groups[group_type],
+          toLabelString: box => toPoseLabelString({ ...box, ...metadata }),
+        })
         break
       }
       default: {
@@ -506,21 +523,37 @@ export async function saveLabelFile(file: string, lines: string[]) {
   await writeFile(file, content)
 }
 
-async function saveLabelFiles<Box>(
-  dataset_dir: string,
-  group_type: string,
-  dict: ImageLabelDict<Box>,
-  toLabelString: (box: Box) => string,
-) {
+async function saveLabelFiles<Box>(options: {
+  import_dataset_dir: string
+  export_dataset_dir: string
+  group_type: string
+  dict: ImageLabelDict<Box>
+  toLabelString: (box: Box) => string
+}) {
+  const {
+    export_dataset_dir,
+    import_dataset_dir,
+    group_type,
+    dict,
+    toLabelString,
+  } = options
+
+  const import_images_dir = join(import_dataset_dir, group_type, 'images')
+  const export_images_dir = join(export_dataset_dir, group_type, 'images')
+
   for (const image_filename in dict) {
     const boxes = dict[image_filename]
     const lines = boxes.map(toLabelString)
     const label_file = join(
-      dataset_dir,
+      export_dataset_dir,
       group_type,
       'labels',
       toLabelFilename(image_filename),
     )
     await saveLabelFile(label_file, lines)
+
+    const import_image_file = join(import_images_dir, image_filename)
+    const export_image_file = join(export_images_dir, image_filename)
+    await copyFile(import_image_file, export_image_file)
   }
 }
