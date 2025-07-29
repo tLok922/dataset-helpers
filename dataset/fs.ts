@@ -524,21 +524,3 @@ async function saveLabelFiles<Box>(
     await saveLabelFile(label_file, lines)
   }
 }
-
-async function test() {
-  const dir = 'cat-pose-dataset_kpt6'
-  const task = 'pose'
-  // const task = 'detect'
-
-  const result = await importDataset({ dir, task })
-  //optional create preview images
-  await createPreviewImages({ task, dir, ...result })
-
-  const export_dir = 'dataset2'
-  await exportDataset({
-    dir: export_dir,
-    task,
-    ...result,
-  })
-}
-test()
