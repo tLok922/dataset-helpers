@@ -256,8 +256,9 @@ export async function getBoundingBoxesOfOneLabel<
 // ==================== Generate Preview Image ====================
 export async function createPreviewImages(options: DatasetOptions) {
   const { dataset_dir } = options
-  const preview_path_base64_pair_groups =
-    await getPreviewPathsAndBase64(options)
+  const preview_path_base64_pair_groups = await getPreviewPathsAndBase64(
+    options,
+  )
   const group_types = ['train', 'test', 'val'] satisfies Array<
     keyof BoundingBoxGroups
   >
