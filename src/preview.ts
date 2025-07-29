@@ -6,7 +6,7 @@ import {
   BoundingBoxWithKeypoints,
   isBoundingBoxWithKeypoints,
 } from './label'
-import { drawBox } from 'yolo-helpers/dist/canvas'
+import { drawBox } from './canvas'
 import { createCanvas, loadImage } from 'canvas'
 import { writeFile } from 'fs/promises'
 import { DatasetOptions, BoundingBoxGroups, ImageLabelDict } from './fs'
