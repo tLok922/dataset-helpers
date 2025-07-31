@@ -1,5 +1,13 @@
 node_modules/
 dist/
+dataset/
+dataset/*
+dataset2/
+classify-dataset/
+classify-dataset-groups/
+cat-pose-dataset/
+cat-pose-dataset_kpt6/
+cat-pose-dataset_experimental_keypoint_crops/
 *-lock.json
 *-lock.yaml
 *.lock
