@@ -1,10 +1,10 @@
-// import { readFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
 import { existsSync } from "fs";
-import { extname, basename, join, dirname } from "path";
+import path, { extname, basename, join, dirname } from "path";
 import {
   ClassifyYamlOptions,
   DetectYamlOptions,
   PoseYamlOptions,
+  parseClassifyDataYaml,
   parseDataYaml,
   toClassifyDataYamlString,
   toDataYamlString,
@@ -17,12 +17,18 @@ import {
   ParsePoseLabelOptions,
   toPoseLabelString,
   toDetectLabelString,
+  MultiLabelBoundingBox,
+  parseMultiLabelString,
+  MultiLabelBoundingBoxWithKeypoints,
 } from "./label";
 import { getDirFilenamesSync } from "@beenotung/tslib/fs";
 import { readdir, copyFile, writeFile, mkdir, readFile } from "fs/promises";
 import { extract_lines } from "@beenotung/tslib/string";
 import { drawLabel, dataURLToBase64 } from "./preview";
-import { group } from "console";
+import { error, group } from "console";
+import { group_types, GroupType } from "./group";
+import { genDispatchGroupSequence } from "./split";
+import { dirpathSymbol } from "@beenotung/tslib";
 
 export function validateDatasetDir(
   dataset_dir: string,
@@ -39,11 +45,15 @@ export function validateDatasetDir(
   });
 }
 
-const image_extensions = [".jpg", ".jpeg", ".png"];
+const image_extensions = [".jpg", ".jpeg", ".png", ".webp"];
+
+function isImageFile(filename: string): boolean {
+  return image_extensions.includes(extname(filename).toLowerCase());
+}
 
 export function getImagePaths(dir: string, group: string): string[] {
   return getDirFilenamesSync(join(dir, group, "images")).filter((file) => {
-    if (!image_extensions.includes(extname(file))) {
+    if (!isImageFile(file)) {
       throw new Error(`Error: Unsupported image type (Given ${extname(file)})`);
     }
     return true;
@@ -333,7 +343,7 @@ export async function saveYAMLFile(
   const newContent = content.trim() + "\n";
 
   if (existsSync(save_path)) {
-    const oldContent = await readFile(save_path).toString();
+    const oldContent = (await readFile(save_path)).toString();
     if (newContent === oldContent) return "no change";
   }
 
@@ -360,12 +370,30 @@ export async function saveJsonFile(
   }
 }
 
+let created_dirs = new Set<string>();
+export async function cachedMkdir(dir: string) {
+  if (created_dirs.has(dir)) return;
+  await mkdir(dir, { recursive: true });
+  created_dirs.add(dir);
+}
+
 // ==================== Dataset Options Types ====================
 export type DatasetOptions = DetectDatasetOptions | PoseDatasetOptions;
 
+export type MultiLabelDatasetOptions =
+  | DetectMultiLabelDatasetOptions
+  | PoseMultiLabelDatasetOptions;
+
 type BaseDatasetOptions = {
   dataset_dir: string;
+  group_ratio?: Record<GroupType, number>;
+  dispatch_group?: (options: {
+    group_type: GroupType | "";
+    class_name: string;
+    filename: string;
+  }) => GroupType;
 };
+
 export type ClassifyDatasetOptions = BaseDatasetOptions & {
   task: "classify";
   metadata: ClassifyYamlOptions;
@@ -374,16 +402,35 @@ export type ClassifyDatasetOptions = BaseDatasetOptions & {
 
 export type ExportClassifyDatasetOptions = ClassifyDatasetOptions & {
   import_dataset_dir: string;
+  /** default is do-not-rebalance */
+  group_ratio?: Record<GroupType, number>;
+  dispatch_group?: (options: {
+    group_type: GroupType | "";
+    class_name: string;
+    filename: string;
+  }) => GroupType;
 };
+
 export type DetectDatasetOptions = BaseDatasetOptions & {
   task: "detect";
   metadata: DetectYamlOptions;
   bounding_box_groups: BoundingBoxGroups<BoundingBox>;
 };
+
 export type PoseDatasetOptions = BaseDatasetOptions & {
   task: "pose";
   metadata: PoseYamlOptions;
   bounding_box_groups: BoundingBoxGroups<BoundingBoxWithKeypoints>;
+};
+
+export type DetectMultiLabelDatasetOptions = BaseDatasetOptions & {
+  task: "detect";
+  image_annotations_map: ImageMultiLabelDict<MultiLabelBoundingBox>;
+};
+
+export type PoseMultiLabelDatasetOptions = BaseDatasetOptions & {
+  task: "pose";
+  image_annotations_map: ImageMultiLabelDict<MultiLabelBoundingBoxWithKeypoints>;
 };
 
 export type BoundingBoxGroups<Box = BoundingBox> = {
@@ -394,6 +441,15 @@ export type BoundingBoxGroups<Box = BoundingBox> = {
 
 export type ImageLabelDict<Box = BoundingBox> = {
   [image_filename: string]: Box[];
+};
+
+export type ImageMultiLabelDict<
+  Box = MultiLabelBoundingBox | MultiLabelBoundingBoxWithKeypoints
+> = {
+  [image_id: number]: {
+    bounding_boxes: Box[];
+    image_filename: string;
+  };
 };
 
 // ==================== Dataset Import (From specified directory) ====================
@@ -448,11 +504,54 @@ export async function importDataset(options: {
     val: bounding_box_dict_val,
   };
 
-  console.log("Imported dataset");
+  console.log(`Imported dataset (task type: ${task})`);
+
   return {
     metadata,
     bounding_box_groups,
   };
+}
+
+//coco
+export async function importMultiLabelCocoDataset(options: {
+  dataset_dir: string;
+  task: "detect";
+  json_filename?: string;
+}): Promise<ImageMultiLabelDict>;
+export async function importMultiLabelCocoDataset(options: {
+  dataset_dir: string;
+  task: "pose";
+  json_filename?: string;
+}): Promise<ImageMultiLabelDict>;
+export async function importMultiLabelCocoDataset(options: {
+  dataset_dir: string;
+  task: "detect" | "pose";
+  json_filename?: string;
+}): Promise<ImageMultiLabelDict> {
+  const { dataset_dir, task } = options;
+  const json_filename = options.json_filename ?? "labels.json";
+  // validateDatasetDir
+
+  const path = join(dataset_dir, json_filename);
+  const json_str = await readFile(path, "utf-8");
+  const { categories, images, annotations } = JSON.parse(json_str);
+  const image_annotations_map: ImageMultiLabelDict = Object.create(null);
+  for (const image of images) {
+    const image_id: number = image["id"];
+    const image_filename: string = image["file_name"];
+    image_annotations_map[image_id] = {
+      image_filename,
+      bounding_boxes: [],
+    };
+  }
+  for (const annotation of annotations) {
+    const box =
+      task === "pose"
+        ? parseMultiLabelString("pose", annotation)
+        : parseMultiLabelString("detect", annotation);
+    image_annotations_map[annotation.image_id].bounding_boxes.push(box);
+  }
+  return image_annotations_map;
 }
 
 export type ClassifyGroups = {
@@ -460,22 +559,79 @@ export type ClassifyGroups = {
 };
 
 export type ClassifyImagePaths = {
+  // class name -> image filename
   [class_name: string]: string[];
 };
 
-function isImageFile(filename: string): boolean {
-  return image_extensions.includes(extname(filename).toLowerCase());
+async function validateClassifyYamlContent(
+  dataset_dir: string,
+  yaml_content: string
+): Promise<ClassifyYamlOptions | undefined> {
+  const metadata = yaml_content
+    ? parseClassifyDataYaml(yaml_content)
+    : undefined;
+  if (metadata) {
+    let train_path = metadata?.train_path;
+    let val_path = metadata?.val_path;
+    let test_path = metadata?.test_path;
+    let n_class = metadata.n_class;
+    let class_names = metadata.class_names;
+
+    //validate yaml metadata
+    //1. if class names exists and n_class !== class_names.length -> error
+    if (class_names && n_class !== class_names.length) {
+      throw new Error(
+        `Mismatch between n_class and class_names.length: n_class=${n_class}, no. of class names = ${class_names.length}`
+      );
+    }
+    if (class_names.length === 0 || n_class === 0) {
+      throw new Error(
+        `No. of classes cannot be 0: receive class_names=${class_names} and n_class=${n_class}`
+      );
+    }
+
+    //2. validate class_names for all dirs
+    //path dir should have the same no. of class name dirs as n_class
+    let flag = false;
+    for (const group_path of [train_path, test_path, val_path]) {
+      for (const class_name of class_names) {
+        if (group_path) {
+          flag = true;
+          const path = join(dataset_dir, group_path, class_name);
+          if (!existsSync(path))
+            throw new Error(`Path does not exist: receive ${path}`);
+        }
+      }
+    }
+    if (!flag) {
+      for (const class_name of class_names) {
+        const path = join(dataset_dir, class_name);
+        if (!existsSync(path))
+          throw new Error(`Path does not exist: receive ${path}`);
+      }
+    }
+  }
+  return metadata;
 }
 
 export async function importClassifyDataset(options: {
   dataset_dir: string;
   yaml_filename?: string;
 }): Promise<ClassifyDatasetOptions> {
-  const { dataset_dir } = options;
+  const { dataset_dir, yaml_filename } = options;
+
+  //yaml parsing
+  const yaml_content = yaml_filename
+    ? await readFile(join(dataset_dir, yaml_filename), "utf-8")
+    : undefined;
+  const parsed_metadata = yaml_content
+    ? await validateClassifyYamlContent(dataset_dir, yaml_content)
+    : undefined;
+
   const classify_groups: ClassifyGroups = {};
   const group_types = ["train", "test", "val"];
 
-  // Discover group paths (train/test/val) or fallback
+  // Discover group paths (train/test/val) or group type = empty string
   const dirents = await readdir(dataset_dir, { withFileTypes: true });
   let group_paths = dirents
     .filter(
@@ -501,15 +657,31 @@ export async function importClassifyDataset(options: {
       classify_groups[group_type][class_name] = image_filenames;
     }
   }
+  let train_path =
+    parsed_metadata?.train_path ??
+    (classify_groups["train"] ? "../train" : undefined);
 
-  const all_class_names = Array.from(
+  let val_path =
+    parsed_metadata?.val_path ??
+    (classify_groups["val"] ? "../val" : undefined);
+
+  let test_path =
+    parsed_metadata?.test_path ??
+    (classify_groups["test"] ? "../test" : undefined);
+
+  const class_names = Array.from(
     new Set(Object.values(classify_groups).flatMap(Object.keys))
   ).sort();
 
   const metadata = {
-    n_class: all_class_names.length,
-    class_names: all_class_names,
+    train_path,
+    val_path,
+    test_path,
+    n_class: parsed_metadata ? parsed_metadata.n_class : class_names.length,
+    class_names: parsed_metadata ? parsed_metadata.class_names : class_names,
   };
+
+  console.log(`Imported dataset (task type: classify)`);
 
   return {
     dataset_dir,
@@ -519,80 +691,14 @@ export async function importClassifyDataset(options: {
   };
 }
 
-//old code
-// export async function importClassifyDataset(options: {
-//   dataset_dir: string;
-//   yaml_filename?: string;
-// }): Promise<ClassifyDatasetOptions> {
-//   const { dataset_dir } = options;
-//   const yaml_filename = options.yaml_filename ?? undefined;
-//   //if yaml exists, parse metadata
-//   // else count metadata in loop below
-//   const classify_groups: ClassifyGroups = {};
-
-//   const group_paths = (await readdir(dataset_dir, { withFileTypes: true }))
-//     .filter((dirent) => {
-//       return (
-//         dirent.isDirectory() && ["train", "test", "val"].includes(dirent.name)
-//       );
-//     })
-//     .map((dirent) => join(dataset_dir, dirent.name));
-//   //step 1: check if dir contains train/test/val
-//   //step 2a: yes -> loop classify groups
-//   //step 2b: no -> step 3 or classify_groups['']
-//   //step 3: for each class name, create classify image paths & put paths in it
-//   //step 4: put classify image paths into classify_groups
-
-//   //if empty, add placeholder group type
-//   const placeholder_group_type = join(dataset_dir, "?");
-//   if (group_paths.length === 0) {
-//     group_paths.push(placeholder_group_type);
-//   }
-
-//   for (const group_path of group_paths) {
-//     const group_type =
-//       group_path === placeholder_group_type ? "" : basename(group_path);
-//     classify_groups[group_type] = {};
-
-//     // assume class exists in all group types
-//     const class_dirents = await readdir(join(dataset_dir, group_type), {
-//       withFileTypes: true,
-//     });
-//     for (const class_dirent of class_dirents) {
-//       if (class_dirent.isDirectory()) {
-//         const class_name = class_dirent.name;
-//         const class_path = join(dataset_dir, group_type, class_name);
-
-//         // read all image in the class name dir
-//         classify_groups[group_type][class_name] = (await readdir(class_path))
-//           .filter(isImageFile)
-//           .map((fname) => fname);
-//       }
-//     }
-//   }
-//   const allClassNames = Array.from(
-//     new Set(
-//       Object.values(classify_groups).flatMap((group) => Object.keys(group))
-//     )
-//   ).sort();
-
-//   const metadata = {
-//     n_class: allClassNames.length,
-//     class_names: allClassNames,
-//   };
-
-//   return {
-//     dataset_dir,
-//     task: "classify",
-//     metadata,
-//     classify_groups,
-//   };
-// }
-
-// ==================== Dataset Export (To specified directory) ====================
 export type ExportDatasetOptions = DatasetOptions & {
   import_dataset_dir: string;
 };
+
+export type ExportMultiLabelDatasetOptions = MultiLabelDatasetOptions & {
+  import_dataset_dir: string;
+};
+
 export async function exportDataset(
   options: ExportDatasetOptions
 ): Promise<void> {
@@ -605,11 +711,11 @@ export async function exportDataset(
   const yaml_str = toDataYamlString(task, metadata);
   await writeFile(yaml_path, yaml_str);
 
-  const groups = ["train", "test", "val"] satisfies Array<
+  const group_types = ["train", "test", "val"] satisfies Array<
     keyof BoundingBoxGroups
   >;
 
-  for (const group_type of groups) {
+  for (const group_type of group_types) {
     const task = options.task;
 
     switch (options.task) {
@@ -641,18 +747,178 @@ export async function exportDataset(
       }
     }
   }
-
-  console.log("Exported dataset");
+  console.log(`Exported dataset (task type: ${task})`);
 }
 
-export async function exportClassifyDataset(
+// ==================== Export Classify Dataset ========================
+async function mkdirAndUpdateMetadataPathsForClassify(
   options: ExportClassifyDatasetOptions
 ) {
-  const { import_dataset_dir, dataset_dir, classify_groups, metadata } =
-    options;
+  const {
+    metadata,
+    import_dataset_dir,
+    dataset_dir: export_dataset_dir,
+    group_ratio,
+    dispatch_group,
+    classify_groups,
+  } = options;
+  if (!group_ratio && !dispatch_group) {
+    // default
+    metadata.train_path = metadata.train_path
+      ? metadata.train_path.replaceAll("\\", "/")
+      : undefined;
+    metadata.test_path = metadata.test_path
+      ? metadata.test_path.replaceAll("\\", "/")
+      : undefined;
+    metadata.val_path = metadata.val_path
+      ? metadata.val_path.replaceAll("\\", "/")
+      : undefined;
+    for (const group_type in classify_groups) {
+      const group_path = join(export_dataset_dir, group_type);
+      for (const class_name of metadata.class_names) {
+        const class_path = join(group_path, class_name);
+        await mkdir(class_path, { recursive: true });
+      }
+    }
+  } else {
+    for (const group_type of group_types) {
+      const group_path = join(export_dataset_dir, group_type);
+      if (!group_ratio || group_ratio[group_type] > 0) {
+        metadata[`${group_type}_path`] = `../${group_type}`;
+        for (const class_name of metadata.class_names) {
+          const class_path = join(group_path, class_name);
+          await mkdir(class_path, { recursive: true });
+        }
+      } else {
+        metadata[`${group_type}_path`] = undefined;
+      }
+    }
+  }
+  return metadata;
+}
 
+async function exportRedistributedClassifyDataset(
+  options: ExportClassifyDatasetOptions
+) {
+  const {
+    metadata,
+    import_dataset_dir,
+    dataset_dir: export_dataset_dir,
+    group_ratio,
+    dispatch_group,
+    classify_groups,
+  } = options;
+  if (group_ratio && !dispatch_group) {
+    // class_name -> {group_type, filename}[]
+    let class_name_to_images: Record<
+      string,
+      { group_type: string; filename: string }[]
+    > = Object.create(null);
+
+    // populate class_name_to_images
+    for (let [group_type, class_name_to_filenames] of Object.entries(
+      classify_groups
+    )) {
+      for (let [class_name, filenames] of Object.entries(
+        class_name_to_filenames
+      )) {
+        class_name_to_images[class_name] ??= [];
+        for (let filename of filenames) {
+          class_name_to_images[class_name].push({ group_type, filename });
+        }
+      }
+    }
+
+    for (let [class_name, images] of Object.entries(class_name_to_images)) {
+      let group_seq = genDispatchGroupSequence({
+        target: group_ratio,
+        total: images.length,
+      });
+      let image_idx = 0;
+      for (let dest_group_type of group_seq) {
+        let image = images[image_idx];
+        image_idx++;
+        let src_file = join(
+          import_dataset_dir,
+          image.group_type,
+          class_name,
+          image.filename
+        );
+        let dest_file = join(
+          export_dataset_dir,
+          dest_group_type,
+          class_name,
+          image.filename
+        );
+        await copyFile(src_file, dest_file);
+      }
+    }
+  }
+}
+
+async function exportClassifyDatasetWithCustomDispatchGroups(
+  options: ExportClassifyDatasetOptions
+) {
+  const {
+    metadata,
+    import_dataset_dir,
+    dataset_dir: export_dataset_dir,
+    group_ratio,
+    dispatch_group,
+    classify_groups,
+  } = options;
+  if (dispatch_group) {
+    if (group_ratio) {
+      console.warn(
+        `option.group_ratio is ignored when option.dispatch_group is specified`
+      );
+    }
+    for (let [group_type, class_name_to_filenames] of Object.entries(
+      classify_groups
+    )) {
+      for (let [class_name, filenames] of Object.entries(
+        class_name_to_filenames
+      )) {
+        for (let filename of filenames) {
+          let dest_group_type = dispatch_group({
+            group_type: group_type as GroupType | "",
+            class_name,
+            filename,
+          });
+          let src_file = join(
+            import_dataset_dir,
+            group_type,
+            class_name,
+            filename
+          );
+          let dest_file = join(
+            export_dataset_dir,
+            dest_group_type,
+            class_name,
+            filename
+          );
+          await copyFile(src_file, dest_file);
+        }
+      }
+    }
+  }
+}
+
+async function exportClassifyDatasetDefault(
+  options: ExportClassifyDatasetOptions
+) {
+  const {
+    metadata,
+    import_dataset_dir,
+    dataset_dir: export_dataset_dir,
+    group_ratio,
+    dispatch_group,
+    classify_groups,
+  } = options;
   for (const [group_type, class_map] of Object.entries(classify_groups)) {
-    const group_path = group_type ? join(dataset_dir, group_type) : dataset_dir;
+    const group_path = group_type
+      ? join(export_dataset_dir, group_type)
+      : export_dataset_dir;
 
     for (const class_name of metadata.class_names) {
       const class_path = join(group_path, class_name);
@@ -667,7 +933,7 @@ export async function exportClassifyDataset(
           image_filename
         );
         const export_image_path = join(
-          dataset_dir,
+          export_dataset_dir,
           group_type,
           class_name,
           image_filename
@@ -676,11 +942,35 @@ export async function exportClassifyDataset(
       }
     }
   }
+}
 
+export async function exportClassifyDataset(
+  options: ExportClassifyDatasetOptions
+) {
+  let {
+    import_dataset_dir,
+    dataset_dir: export_dataset_dir,
+    // metadata,
+    classify_groups,
+    group_ratio,
+    dispatch_group,
+  } = options;
+
+  //mkdirs and update metadata paths
+  const metadata = await mkdirAndUpdateMetadataPathsForClassify(options);
+
+  if (group_ratio && !dispatch_group) {
+    await exportRedistributedClassifyDataset(options);
+  } else if (dispatch_group) {
+    await exportClassifyDatasetWithCustomDispatchGroups(options);
+  } else {
+    await exportClassifyDatasetDefault(options);
+  }
   saveYAMLFile(
-    join(dataset_dir, "data.yaml"),
+    join(export_dataset_dir, "data.yaml"),
     toClassifyDataYamlString({ ...metadata })
   );
+  console.log(`Exported dataset (task type: classify)`);
 }
 
 async function createExportDatasetDirs(export_dir_path: string): Promise<void> {
@@ -690,9 +980,7 @@ async function createExportDatasetDirs(export_dir_path: string): Promise<void> {
   for (const group_type of group_types) {
     for (const data_type of data_types) {
       const dir_path = join(export_dir_path, group_type, data_type);
-      if (!existsSync(dir_path)) {
-        await mkdir(dir_path, { recursive: true });
-      }
+      await cachedMkdir(dir_path);
     }
   }
 }
