@@ -1,51 +1,16 @@
 import { existsSync } from "fs";
 import { stat, readdir, readFile } from "fs/promises";
-import path, { basename, dirname, extname, join, relative } from "path";
+import { basename, dirname, extname, join } from "path";
 import {
   DetectYamlOptions,
   parseClassifyDataYaml,
   parseDataYaml,
   PoseYamlOptions,
 } from "./yaml";
-import { parseLabelString, PoseLabelStringOptions } from "./label";
+import xml_to_json from "xml-parser";
 import { getDirFilenames, getDirFilenamesSync } from "@beenotung/tslib";
 
 //import
-async function importDataset(args: {
-  task: "classify";
-  importDatasetPath: string | string[];
-}): Promise<ClassifyDataset>;
-async function importDataset(args: {
-  task: "detect";
-  importDatasetPath: string | string[];
-}): Promise<DetectDataset>;
-async function importDataset(args: {
-  task: "pose";
-  importDatasetPath: string | string[];
-}): Promise<PoseDataset>;
-async function importDataset(args: {
-  task: "classify" | "detect" | "pose";
-  importDatasetPath: string | string[];
-}): Promise<UnionDataset> {
-  const paths = Array.isArray(args.importDatasetPath)
-    ? args.importDatasetPath
-    : [args.importDatasetPath];
-
-  // Decide format from file/folder pattern
-  const format = await detectFormat(args.importDatasetPath);
-
-  switch (format) {
-    case "yolo":
-      return await importYoloDataset(args.task, paths);
-    case "coco":
-      return await importCocoDataset(args.task, paths);
-    // case "pascal_voc":
-    //   return importPascalVocDataset(args.task, paths);
-    default:
-      throw new Error(`Unknown dataset format for paths: ${paths.join(", ")}`);
-  }
-}
-
 async function isDirectory(dirPath: string): Promise<boolean> {
   return (await stat(dirPath)).isDirectory();
 }
@@ -58,19 +23,85 @@ async function hasXmlFile(dirPath: string): Promise<boolean> {
   return false;
 }
 
-async function detectFormat(
+async function detectDatasetFormat(
   path: string | string[]
 ): Promise<"yolo" | "coco" | "pascal_voc"> {
   if (Array.isArray(path)) {
-    if (path.every((p) => p.toLowerCase().endsWith(".json"))) {
-      return "coco";
-    }
+    // e.g. ["./dataset/labels_train.json","./dataset/test_labels.json"]
+    if (path.every((path) => isExt(path, "json"))) return "coco";
   } else {
-    if (path === "" || path.toLowerCase().endsWith(".yaml")) return "yolo";
-    else if (path.toLowerCase().endsWith(".json")) return "coco";
-    else if (await hasXmlFile(path)) return "pascal_voc";
+    // e.g. "./dataset/labels.json"
+    if (isExt(path, "json")) return "coco";
+    // e.g. "./dataset/data.yaml"
+    if (isExt(path, "yaml")) return "yolo";
+    if (await isDirectory(path)) {
+      // e.g. "./dataset/Annotations" with "1.xml" inside
+      if (await hasXmlFile(path)) return "pascal_voc";
+      // e.g. "./dataset" with "{train,val,test}/{dog,cat}/1.jpg"
+      return "yolo";
+    }
   }
-  throw new Error("Cannot detect dataset format from given paths");
+
+  throw new Error(
+    "Cannot detect dataset format from given paths: " + JSON.stringify(path)
+  );
+}
+
+function isExt(path: string, ext: string) {
+  return path.toLowerCase().endsWith("." + ext);
+}
+
+export type ImportDatasetCallbacks = {
+  getImageId?: (imageFilename: string) => number;
+  getCategoryId?: (categoryName: string) => number;
+};
+
+export async function importDataset(
+  args: {
+    task: "classify";
+    importDatasetPath: string | string[];
+  } & ImportDatasetCallbacks
+): Promise<ClassifyDataset>;
+export async function importDataset(
+  args: {
+    task: "detect";
+    importDatasetPath: string | string[];
+    getAnnotationId?: (annotation: Omit<BoxAnnotation, "id">) => number;
+  } & ImportDatasetCallbacks
+): Promise<DetectDataset>;
+export async function importDataset(
+  args: {
+    task: "pose";
+    importDatasetPath: string | string[];
+    getAnnotationId?: (annotation: Omit<KeypointsAnnotation, "id">) => number;
+  } & ImportDatasetCallbacks
+): Promise<PoseDataset>;
+export async function importDataset(
+  args: {
+    task: "classify" | "detect" | "pose";
+    importDatasetPath: string | string[];
+    //TODO: implement custom id support
+    getAnnotationId?: (annotation: Omit<KeypointsAnnotation, "id">) => number;
+  } & ImportDatasetCallbacks
+): Promise<UnionDataset> {
+  const paths = Array.isArray(args.importDatasetPath)
+    ? args.importDatasetPath
+    : [args.importDatasetPath];
+
+  // Decide format from file/folder pattern
+  const format = await detectDatasetFormat(args.importDatasetPath);
+
+  //TODO: metadata
+  switch (format) {
+    case "yolo":
+      return await importYoloDataset(args.task, paths);
+    case "coco":
+      return await importCocoDataset(args.task, paths);
+    // case "pascal_voc":
+    //   return importPascalVocDataset(args.task, paths);
+    default:
+      throw new Error(`Unknown dataset format for paths: ${paths.join(", ")}`);
+  }
 }
 
 // ---------------- YOLO ----------------
@@ -129,10 +160,7 @@ function isImageFile(filename: string): boolean {
   return image_extensions.includes(extname(filename).toLowerCase());
 }
 
-async function getImagePaths(
-  dir: string,
-  group: string
-): Promise<string[]> {
+async function getImagePaths(dir: string, group: string): Promise<string[]> {
   return (await getDirFilenames(join(dir, group, "images"))).filter((file) => {
     if (!isImageFile(file)) {
       throw new Error(`Error: Unsupported image type (Given ${extname(file)})`);
@@ -275,7 +303,8 @@ async function importYoloDataset(
         });
       }
     }
-  } else throw new Error(``); //TODO
+  } else
+    throw new Error(`Invalid path for task type: ${task}! Received ${path}`);
 
   let imageIdCounter = 1;
 
@@ -310,7 +339,7 @@ async function importYoloDataset(
       const imageFiles = await readdir(imageDir);
       for (const filename of imageFiles) {
         const imageId = imageIdCounter++;
-        const annotations: (BoxAnnotation | KeypointsAnnotation)[] = []; //TODO: define type for annotations
+        const annotations: (BoxAnnotation | KeypointsAnnotation)[] = [];
         const labelFile = join(labelDir, filename.replace(/\.[^.]+$/, ".txt"));
 
         if (!existsSync(labelFile)) {
@@ -433,7 +462,7 @@ async function importYoloDataset(
           ? ("" as "" | "train" | "val" | "test")
           : (basename(groupPath) as "train" | "val" | "test");
 
-      //BUG
+      //possible bug
       const classEntries = await readdir(groupPath, { withFileTypes: true });
       for (const classEntry of classEntries) {
         if (!classEntry.isDirectory()) continue;
@@ -485,15 +514,7 @@ async function importYoloDataset(
   throw new Error(`YOLO task ${task} not supported`);
 }
 
-async function test() {
-  const path = "coco-dataset/internal.json";
-  const task = "detect";
-  const result = await importDataset({ task, importDatasetPath: path });
-}
-test();
-
 // ---------------- COCO ----------------
-
 async function importCocoDataset(
   task: "classify" | "detect" | "pose",
   jsonFilePaths: string[]
@@ -543,6 +564,7 @@ async function importCocoDataset(
           group: groupLabel as "train" | "val" | "test" | "",
         });
       } else {
+        //TODO: Add validation
         const imageAnnotations: (BoxAnnotation | KeypointsAnnotation)[] =
           annotationsForImage.map(
             (annotation: any, annotationIndex: number) => {
@@ -594,13 +616,10 @@ async function importCocoDataset(
 }
 
 // ---------------- Pascal VOC ----------------
-
-// import xml2js from "xml2js";
-
-// function importPascalVocDataset(
+// async function importPascalVocDataset(
 //   task: "classify" | "detect" | "pose",
 //   paths: string[]
-// ): UnionDataset {
+// ): Promise<UnionDataset> {
 //   if (task !== "detect") throw new Error("Pascal VOC only supports detect");
 
 //   const annDir = paths.find((p) =>
@@ -611,9 +630,10 @@ async function importCocoDataset(
 //   let idCounter = 1;
 //   let catCounter = 0;
 
-//   for (const file of fs.readdirSync(annDir)) {
+//   for (const file of (await readdir(annDir))) {
 //     if (!file.endsWith(".xml")) continue;
-//     const xml = fs.readFileSync(path.join(annDir, file), "utf8");
+//     const xml = await readFile(join(annDir, file), "utf8");
+//     //TODO: implement xml parsing
 //     const parsed = xml2js.parseStringSync
 //       ? (xml2js as any).parseStringSync(xml)
 //       : (() => {
@@ -721,6 +741,7 @@ type ImportDatasetOptions = {
    *   - ./dataset/Annotations
    *   - ./dataset/annotations
    */
+  task: "classify" | "detect" | "pose";
   importDatasetPath: string | string[];
 };
 
