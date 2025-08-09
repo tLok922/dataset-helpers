@@ -8,6 +8,7 @@ classify-dataset-groups/
 cat-pose-dataset/
 cat-pose-dataset_kpt6/
 cat-pose-dataset_experimental_keypoint_crops/
+coco-dataset/
 *-lock.json
 *-lock.yaml
 *.lock

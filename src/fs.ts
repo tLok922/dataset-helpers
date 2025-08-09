@@ -29,6 +29,7 @@ import { error, group } from "console";
 import { group_types, GroupType } from "./group";
 import { genDispatchGroupSequence } from "./split";
 import { dirpathSymbol } from "@beenotung/tslib";
+import { json } from "stream/consumers";
 
 export function validateDatasetDir(
   dataset_dir: string,
@@ -530,16 +531,40 @@ export async function importMultiLabelCocoDataset(options: {
 }): Promise<ImageMultiLabelDict> {
   const { dataset_dir, task } = options;
   const json_filename = options.json_filename ?? "labels.json";
-  // validateDatasetDir
+  
+  if (!existsSync(join(dataset_dir, json_filename))) {
+    throw new Error(`Invalid json label path: ${join(dataset_dir, json_filename)} does not exist`);
+  }
 
+  if (!existsSync(join(dataset_dir, 'data'))) {
+    throw new Error(`Invalid image directory path: ${join(dataset_dir, 'data')} does not exist`);
+  }
+  
   const path = join(dataset_dir, json_filename);
   const json_str = await readFile(path, "utf-8");
   const { categories, images, annotations } = JSON.parse(json_str);
   const image_annotations_map: ImageMultiLabelDict = Object.create(null);
+  const image_dir = join(dataset_dir, "data");
+
+  if (!existsSync(image_dir)) {
+    throw new Error(`Invalid path: ${image_dir} does not exist`);
+  }
+
   for (const image of images) {
     const image_id: number = image["id"];
     const image_filename: string = image["file_name"];
-    image_annotations_map[image_id] = {
+    const image_path = join(image_dir, image_filename);
+
+    if (!existsSync(image_path)) {
+      throw new Error(`Invalid image path: ${image_path} does not exist`);
+    }
+
+
+    //m=new Map()
+    //m.set(k,v)
+    //m.get(k)
+    //Array.from(m.values())
+    image_annotations_map[image_id] = {//use map
       image_filename,
       bounding_boxes: [],
     };
@@ -549,8 +574,15 @@ export async function importMultiLabelCocoDataset(options: {
       task === "pose"
         ? parseMultiLabelString("pose", annotation)
         : parseMultiLabelString("detect", annotation);
+    // TODO: if annotation.image_id is not in image_annotations_map, throw error
+    if (!image_annotations_map[annotation.image_id]) {
+      throw new Error(
+        `Invalid image_id in annotation: images does not contain image_id: ${annotation.image_id}`
+      );
+    }
     image_annotations_map[annotation.image_id].bounding_boxes.push(box);
   }
+  console.log(`Imported multi-label COCO dataset (task type: ${task})`);
   return image_annotations_map;
 }
 

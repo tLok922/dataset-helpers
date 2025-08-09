@@ -383,43 +383,9 @@ export async function exportMultiLabelDataset(
       }
     }
   }
-
+  
   async function save_sample(args: { sample: Sample; group_type: GroupType }) {
-    const { sample, group_type } = args;
-    const { class_name, filename: image_filename } = sample;
-    const label_filename =
-      basename(image_filename, extname(image_filename)) + ".txt";
-
-    const images_src_dir = join(
-      import_dataset_dir,
-      sample.group_type,
-      "images"
-    );
-    const images_dest_dir = join(export_dataset_dir, group_type, "images");
-    const labels_dest_dir = join(export_dataset_dir, group_type, "labels");
-
-    await cachedMkdir(images_dest_dir);
-    const image_src_path = join(images_src_dir, image_filename);
-    const image_dest_path = join(images_dest_dir, image_filename);
-    await copyFile(image_src_path, image_dest_path);
-
-    await cachedMkdir(labels_dest_dir);
-    const label_dest_path = join(labels_dest_dir, label_filename);
-    let label_str = "";
-    if (task === "detect") {
-      label_str = toDetectLabelString({ ...sample.box, ...metadata });
-    } else if (task === "pose") {
-      const box = sample.box as BoundingBoxWithKeypoints;
-      label_str = toPoseLabelString({ ...box, ...metadata });
-    } else throw new Error(`Invalid task type: receive ${task}`);
-
-    if (!existsSync(label_dest_path)) {
-      //if txt file does not exist, create txt file
-      await writeFile(label_dest_path, label_str);
-    } else {
-      //else add line to txt file
-      await appendFile(label_dest_path, "\n" + label_str);
-    }
+    
   }
 
   let dispatch_group:
