@@ -1,7 +1,8 @@
-import { existsSync } from "fs";
-import { stat, readdir, readFile } from "fs/promises";
+import { constants, existsSync } from "fs";
+import { stat, readdir, readFile, access } from "fs/promises";
 import { basename, dirname, extname, join } from "path";
 import {
+  ClassifyYamlOptions,
   DetectYamlOptions,
   parseClassifyDataYaml,
   parseDataYaml,
@@ -9,6 +10,7 @@ import {
 } from "./yaml";
 import xml_to_json from "xml-parser";
 import { getDirFilenames, getDirFilenamesSync } from "@beenotung/tslib";
+import { GroupType } from "./group";
 
 //import
 async function isDirectory(dirPath: string): Promise<boolean> {
@@ -60,12 +62,14 @@ export async function importDataset(
   args: {
     task: "classify";
     importDatasetPath: string | string[];
+    missingLabel?: "ignore" | "warn" | "error";
   } & ImportDatasetCallbacks
 ): Promise<ClassifyDataset>;
 export async function importDataset(
   args: {
     task: "detect";
     importDatasetPath: string | string[];
+    missingLabel?: "ignore" | "warn" | "error";
     getAnnotationId?: (annotation: Omit<BoxAnnotation, "id">) => number;
   } & ImportDatasetCallbacks
 ): Promise<DetectDataset>;
@@ -73,6 +77,7 @@ export async function importDataset(
   args: {
     task: "pose";
     importDatasetPath: string | string[];
+    missingLabel?: "ignore" | "warn" | "error";
     getAnnotationId?: (annotation: Omit<KeypointsAnnotation, "id">) => number;
   } & ImportDatasetCallbacks
 ): Promise<PoseDataset>;
@@ -80,23 +85,44 @@ export async function importDataset(
   args: {
     task: "classify" | "detect" | "pose";
     importDatasetPath: string | string[];
-    //TODO: implement custom id support
+    missingLabel?: "ignore" | "warn" | "error";
     getAnnotationId?: (annotation: Omit<KeypointsAnnotation, "id">) => number;
   } & ImportDatasetCallbacks
 ): Promise<UnionDataset> {
-  const paths = Array.isArray(args.importDatasetPath)
-    ? args.importDatasetPath
-    : [args.importDatasetPath];
+  const {
+    task,
+    importDatasetPath,
+    getCategoryId,
+    getImageId,
+    getAnnotationId,
+    missingLabel,
+  } = args;
+  const paths = Array.isArray(importDatasetPath)
+    ? importDatasetPath
+    : [importDatasetPath];
 
   // Decide format from file/folder pattern
-  const format = await detectDatasetFormat(args.importDatasetPath);
+  const format = await detectDatasetFormat(importDatasetPath);
 
-  //TODO: metadata
   switch (format) {
     case "yolo":
-      return await importYoloDataset(args.task, paths);
+      return await importYoloDataset({
+        task,
+        paths,
+        getImageId,
+        getCategoryId,
+        getAnnotationId,
+        missingLabel,
+      });
     case "coco":
-      return await importCocoDataset(args.task, paths);
+      return await importCocoDataset({
+        task,
+        paths,
+        getImageId,
+        getCategoryId,
+        getAnnotationId,
+        missingLabel,
+      });
     // case "pascal_voc":
     //   return importPascalVocDataset(args.task, paths);
     default:
@@ -192,7 +218,7 @@ function getValidatedImageAndLabels(options: {
   labelDir: string;
   imagePaths: string[];
   labelPaths: string[];
-  missingLabels: "error" | "warn" | "ignore";
+  missingLabel: "error" | "warn" | "ignore";
 }) {
   function handleMissingLabel(
     mode: "error" | "warn" | "ignore",
@@ -201,7 +227,7 @@ function getValidatedImageAndLabels(options: {
     if (mode === "error") throw new Error(message);
     if (mode === "warn") console.warn(`Warning: ${message}`);
   }
-  const { imageDir, labelDir, imagePaths, labelPaths, missingLabels } = options;
+  const { imageDir, labelDir, imagePaths, labelPaths, missingLabel } = options;
 
   const validated_image_paths = imagePaths.filter((imagePath) => {
     const image_full_path = join(imageDir, imagePath);
@@ -210,7 +236,7 @@ function getValidatedImageAndLabels(options: {
 
     if (!existsSync(label_full_path)) {
       handleMissingLabel(
-        missingLabels,
+        missingLabel,
         `Label file not found for image: ${image_full_path}`
       );
       return false;
@@ -227,7 +253,7 @@ function getValidatedImageAndLabels(options: {
 
     if (!hasMatchingImage) {
       handleMissingLabel(
-        missingLabels,
+        missingLabel,
         `Image file not found for label: ${label_full_path}`
       );
       return false;
@@ -247,10 +273,22 @@ function getValidatedImageAndLabels(options: {
   };
 }
 
-async function importYoloDataset(
-  task: "classify" | "detect" | "pose",
-  paths: string[]
-): Promise<UnionDataset> {
+async function importYoloDataset(args: {
+  task: "classify" | "detect" | "pose";
+  paths: string[];
+  getImageId?: (imageFilename: string) => number;
+  getCategoryId?: (categoryName: string) => number;
+  getAnnotationId?: (annotation: Omit<KeypointsAnnotation, "id">) => number;
+  missingLabel?: "ignore" | "warn" | "error";
+}): Promise<UnionDataset> {
+  const {
+    task,
+    paths,
+    getImageId,
+    getCategoryId,
+    getAnnotationId,
+    missingLabel,
+  } = args;
   const path = paths[0];
 
   if (!path) {
@@ -274,7 +312,7 @@ async function importYoloDataset(
   const yamlContent = isClassifyAndNoMetadata
     ? ""
     : await readFile(path, "utf-8");
-  const metadata =
+  const yamlMetadata =
     task === "pose"
       ? parseDataYaml("pose", yamlContent)
       : task === "detect"
@@ -285,22 +323,26 @@ async function importYoloDataset(
 
   const datasetDir = isClassifyAndNoMetadata ? path : dirname(path);
   const categories: Map<number, Category> = new Map();
-  if (metadata) {
+
+  if (yamlMetadata) {
     const categoryNames =
-      metadata.class_names ||
-      Array.from({ length: metadata.n_class + 1 }, (_, i) => i.toString());
+      yamlMetadata.class_names ||
+      Array.from({ length: yamlMetadata.n_class + 1 }, (_, i) => i.toString());
 
     categoryNames.forEach((name: string, idx: number) => {
-      categories.set(idx, { categoryName: name, id: idx });
+      const categoryId = getCategoryId ? getCategoryId(name) : idx + 1;
+      categories.set(categoryId, { categoryName: name, id: categoryId });
     });
   } else if (isClassifyAndNoMetadata) {
     let categoryIdx = 1;
     for (const categoryName of await readdir(datasetDir)) {
+      categoryIdx = getCategoryId ? getCategoryId(categoryName) : categoryIdx;
       if (await isDirectory(join(datasetDir, categoryName))) {
         categories.set(categoryIdx, {
           categoryName: categoryName,
           id: categoryIdx,
         });
+        categoryIdx++;
       }
     }
   } else
@@ -333,12 +375,12 @@ async function importYoloDataset(
         labelDir,
         imagePaths,
         labelPaths,
-        missingLabels: "warn",
+        missingLabel: missingLabel ?? "error",
       });
 
       const imageFiles = await readdir(imageDir);
       for (const filename of imageFiles) {
-        const imageId = imageIdCounter++;
+        const imageId = getImageId ? getImageId(filename) : imageIdCounter++;
         const annotations: (BoxAnnotation | KeypointsAnnotation)[] = [];
         const labelFile = join(labelDir, filename.replace(/\.[^.]+$/, ".txt"));
 
@@ -354,7 +396,7 @@ async function importYoloDataset(
 
           validateCategoryId({
             categoryId,
-            nCategory: (metadata as DetectYamlOptions).n_class,
+            nCategory: (yamlMetadata as DetectYamlOptions).n_class,
           });
           validateBoundingBox({ x, y, width, height });
 
@@ -364,7 +406,7 @@ async function importYoloDataset(
                 `Invalid detect label: expected 5 parts but got ${labelParts.length}`
               );
             }
-            annotations.push({
+            const annotation = {
               id: annoId + 1,
               group: groupType as "train" | "test" | "val" | "",
               categoryId: categoryId,
@@ -372,10 +414,13 @@ async function importYoloDataset(
               y,
               width,
               height,
-            });
+            };
+            if (getAnnotationId)
+              annotation.id = getAnnotationId({ ...annotation, keypoints: [] });
+            annotations.push(annotation);
           } else if (task === "pose") {
-            const hasVisibility = (metadata as PoseYamlOptions).visibility;
-            const nKeypoints = (metadata as PoseYamlOptions).n_keypoints;
+            const hasVisibility = (yamlMetadata as PoseYamlOptions).visibility;
+            const nKeypoints = (yamlMetadata as PoseYamlOptions).n_keypoints;
             const step = hasVisibility ? 3 : 2;
             const expectedParts = nKeypoints * step;
 
@@ -411,8 +456,7 @@ async function importYoloDataset(
               }
               parsedKeypoints.push(keypoint);
             }
-
-            annotations.push({
+            const annotation = {
               id: annoId + 1,
               group: groupType as "train" | "test" | "val" | "",
               categoryId: categoryId,
@@ -421,7 +465,10 @@ async function importYoloDataset(
               width,
               height,
               keypoints: parsedKeypoints,
-            });
+            };
+            if (getAnnotationId)
+              annotation.id = getAnnotationId({ ...annotation, keypoints: [] });
+            annotations.push(annotation);
           }
         }
 
@@ -432,9 +479,35 @@ async function importYoloDataset(
         });
       }
     }
-    return { task, categories, images: imagesMap } as
-      | DetectDataset
-      | PoseDataset;
+    if (task === "detect")
+      return {
+        task,
+        categories,
+        images: imagesMap,
+        metadata: {
+          categories,
+          train: yamlMetadata?.train_path,
+          test: yamlMetadata?.test_path,
+          val: yamlMetadata?.val_path,
+        },
+      } as DetectDataset;
+    return {
+      task,
+      categories,
+      images: imagesMap,
+      metadata: {
+        categories,
+        train: yamlMetadata?.train_path,
+        test: yamlMetadata?.test_path,
+        val: yamlMetadata?.val_path,
+        keypoint_names: (yamlMetadata as PoseYamlOptions).keypoint_names,
+        n_keypoints: (yamlMetadata as PoseYamlOptions).n_keypoints,
+        visibility: (yamlMetadata as PoseYamlOptions).visibility
+          ? "visible"
+          : "unannotated",
+        // flip_idx?: number[]; //TODO: design
+      },
+    } as PoseDataset;
   }
 
   // CLASSIFY IMPORT
@@ -483,11 +556,12 @@ async function importYoloDataset(
           });
         }
 
-        for (const fileName of imageFiles) {
+        for (const filename of imageFiles) {
+          const imageId = getImageId ? getImageId(filename) : classifyIdCounter;
           imagesMap.set(classifyIdCounter, {
-            id: classifyIdCounter,
-            filename: fileName,
-            categoryId: categoryId,
+            id: imageId,
+            filename,
+            categoryId,
             group: groupType,
           });
           classifyIdCounter++;
@@ -496,9 +570,9 @@ async function importYoloDataset(
     }
 
     // Override categories with YAML-defined class names if available
-    if (metadata && Array.isArray(metadata.class_names)) {
+    if (yamlMetadata && Array.isArray(yamlMetadata.class_names)) {
       categories.clear();
-      metadata.class_names.forEach((name: string, idx: number) => {
+      yamlMetadata.class_names.forEach((name: string, idx: number) => {
         categories.set(idx, { id: idx, categoryName: name });
       });
     }
@@ -506,8 +580,14 @@ async function importYoloDataset(
     console.log(`Imported YOLO classify dataset with ${imagesMap.size} images`);
     return {
       task: "classify",
-      categories: categories,
+      categories,
       images: imagesMap,
+      metadata: {
+        categories,
+        train: yamlMetadata?.train_path,
+        test: yamlMetadata?.test_path,
+        val: yamlMetadata?.val_path,
+      },
     } as ClassifyDataset;
   }
 
@@ -515,104 +595,216 @@ async function importYoloDataset(
 }
 
 // ---------------- COCO ----------------
-async function importCocoDataset(
-  task: "classify" | "detect" | "pose",
-  jsonFilePaths: string[]
-): Promise<UnionDataset> {
-  const jsonFiles = jsonFilePaths.filter((filePath) =>
-    filePath.endsWith(".json")
-  );
-  const categoriesMap: Map<number, Category> = new Map();
-  const imagesMap: Map<
+async function importCocoDataset(args: {
+  task: "classify" | "detect" | "pose";
+  paths: string[];
+  getImageId?: (imageFilename: string) => number;
+  getCategoryId?: (categoryName: string) => number;
+  getAnnotationId?: (annotation: Omit<KeypointsAnnotation, "id">) => number;
+  missingLabel?: "ignore" | "warn" | "error";
+}): Promise<UnionDataset> {
+  const {
+    task,
+    paths,
+    getImageId,
+    getCategoryId,
+    getAnnotationId,
+    missingLabel = "error",
+  } = args;
+
+  const jsonFiles = paths.filter((filePath) => filePath.endsWith(".json"));
+  const categories = new Map<number, Category>();
+  const imagesMap = new Map<
     number,
     ImageWithLabel | ImageWithBox<BoxAnnotation | KeypointsAnnotation>
-  > = new Map();
+  >();
+
   let internalImageId = 1;
 
+  const getGroupLabel = (filePath: string): GroupType | "" => {
+    if (filePath.includes("train")) return "train";
+    if (filePath.includes("val")) return "val";
+    if (filePath.includes("test")) return "test";
+    return "";
+  };
+
+  const validateFileExists = async (filePath: string) => {
+    try {
+      await access(filePath, constants.F_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const givenGroupTypes = [];
+  let maxNumberOfKeypoints = 0;
+
   for (const jsonFile of jsonFiles) {
-    const fileContent = await readFile(jsonFile, "utf8");
-    const data = JSON.parse(fileContent);
+    const {
+      images = [],
+      annotations = [],
+      categories: catList = [],
+    } = JSON.parse(await readFile(jsonFile, "utf8"));
+    const groupLabel = getGroupLabel(jsonFile);
+    givenGroupTypes.push(groupLabel);
+    const jsonDir = dirname(jsonFile);
 
-    (data.categories || []).forEach((category: any) => {
-      categoriesMap.set(category.id, {
-        id: +category.id + 1,
-        categoryName: category.name,
-      });
-    });
+    // Map old category IDs to new ones
+    const categoryIdMap = new Map<number, number>();
+    const seenCategoryIds = new Set<number>();
 
-    const groupLabel = jsonFile.includes("train")
-      ? "train"
-      : jsonFile.includes("val")
-      ? "val"
-      : jsonFile.includes("test")
-      ? "test"
-      : "";
+    for (const cat of catList) {
+      const newId = getCategoryId
+        ? getCategoryId(cat.name)
+        : Number(cat.id) + 1;
+      if (seenCategoryIds.has(newId)) {
+        throw new Error(`Duplicate category ID detected: ${newId}`);
+      }
+      seenCategoryIds.add(newId);
+      categoryIdMap.set(Number(cat.id), newId);
+      categories.set(newId, { id: newId, categoryName: cat.name });
+    }
 
-    for (const imageEntry of data.images || []) {
-      const annotationsForImage = (data.annotations || []).filter(
-        (annotation: any) => annotation.image_id === imageEntry.id
+    const seenImageIds = new Set<number>();
+
+    for (const img of images) {
+      const imageId = getImageId
+        ? getImageId(img.file_name)
+        : internalImageId++;
+      if (seenImageIds.has(imageId)) {
+        throw new Error(`Duplicate image ID detected: ${imageId}`);
+      }
+      seenImageIds.add(imageId);
+
+      // Validate image file exists
+      const possiblePath = join(jsonDir, "data", img.file_name);
+      const exists = await validateFileExists(possiblePath);
+      if (!exists) {
+        const message = `Image file not found: ${possiblePath}`;
+        if (missingLabel === "error") throw new Error(message);
+        if (missingLabel === "warn") console.warn(message);
+      }
+
+      const annsForImage = annotations.filter(
+        (a: any) => a.image_id === img.id
       );
 
-      if (task === "classify") {
-        const categoryIdForImage = annotationsForImage.length
-          ? annotationsForImage[0].category_id
-          : -1;
-        imagesMap.set(internalImageId, {
-          id: internalImageId,
-          filename: imageEntry.file_name,
-          categoryId: categoryIdForImage,
-          group: groupLabel as "train" | "val" | "test" | "",
-        });
-      } else {
-        //TODO: Add validation
-        const imageAnnotations: (BoxAnnotation | KeypointsAnnotation)[] =
-          annotationsForImage.map(
-            (annotation: any, annotationIndex: number) => {
-              const [x, y, width, height] = annotation.bbox;
-              const baseAnnotation: BoxAnnotation = {
-                id: annotationIndex + 1,
-                group: groupLabel as "train" | "val" | "test" | "",
-                categoryId: annotation.category_id,
-                x,
-                y,
-                width,
-                height,
-              };
-
-              if (annotation.keypoints && Array.isArray(annotation.keypoints)) {
-                const keypoints: Keypoint[] = [];
-                for (let i = 0; i < annotation.keypoints.length; i += 3) {
-                  const [kpX, kpY, visibilityValue] =
-                    annotation.keypoints.slice(i, i + 3);
-                  keypoints.push({
-                    x: kpX,
-                    y: kpY,
-                    visibility:
-                      visibilityValue === 0
-                        ? "unannotated"
-                        : visibilityValue === 1
-                        ? "not_visible"
-                        : "visible",
-                  });
-                }
-                return { ...baseAnnotation, keypoints } as KeypointsAnnotation;
-              }
-
-              return baseAnnotation;
-            }
-          );
-
-        imagesMap.set(internalImageId, {
-          id: internalImageId,
-          filename: imageEntry.file_name,
-          annotations: imageAnnotations,
-        });
+      // Validate annotation references
+      for (const ann of annsForImage) {
+        if (!categoryIdMap.has(ann.category_id)) {
+          const message = `Annotation ${ann.id} references missing category ID ${ann.category_id}`;
+          if (missingLabel === "error") throw new Error(message);
+          if (missingLabel === "warn") console.warn(message);
+        }
       }
-      internalImageId++;
+
+      if (task === "classify") {
+        const categoryIds = annsForImage.map(
+          (a: any) => categoryIdMap.get(a.category_id) ?? a.category_id
+        );
+        imagesMap.set(imageId, {
+          id: imageId,
+          filename: img.file_name,
+          categoryId: categoryIds.length > 1 ? categoryIds : categoryIds[0],
+          group: groupLabel,
+        });
+        continue;
+      }
+
+      // Detection / Pose
+      const seenAnnIds = new Set<number>();
+      const imageAnnotations: (BoxAnnotation | KeypointsAnnotation)[] =
+        annsForImage.map((annotation: any, idx: number) => {
+          const [x, y, width, height] = annotation.bbox;
+          const categoryId =
+            categoryIdMap.get(annotation.category_id) ?? annotation.category_id;
+
+          const baseAnnotation: BoxAnnotation = {
+            id: idx + 1,
+            group: groupLabel,
+            categoryId,
+            x,
+            y,
+            width,
+            height,
+          };
+
+          const annotationId = getAnnotationId
+            ? getAnnotationId({ ...baseAnnotation, keypoints: [] })
+            : idx + 1;
+          if (seenAnnIds.has(annotationId)) {
+            throw new Error(
+              `Duplicate annotation ID detected: ${annotationId} in image ${imageId}`
+            );
+          }
+          seenAnnIds.add(annotationId);
+
+          if (Array.isArray(annotation.keypoints)) {
+            const keypoints: Keypoint[] = [];
+            let nKeypoints = 0;
+            for (let i = 0; i < annotation.keypoints.length; i += 3) {
+              const [kpX, kpY, vis] = annotation.keypoints.slice(i, i + 3);
+              keypoints.push({
+                x: kpX,
+                y: kpY,
+                visibility:
+                  vis === 0
+                    ? "unannotated"
+                    : vis === 1
+                    ? "not_visible"
+                    : "visible",
+              });
+              nKeypoints++;
+            }
+            maxNumberOfKeypoints =
+              nKeypoints > maxNumberOfKeypoints
+                ? nKeypoints
+                : maxNumberOfKeypoints;
+            return {
+              ...baseAnnotation,
+              annotationId,
+              keypoints,
+            } as KeypointsAnnotation;
+          }
+
+          return { ...baseAnnotation, annotationId };
+        });
+
+      imagesMap.set(imageId, {
+        id: imageId,
+        filename: img.file_name,
+        annotations: imageAnnotations,
+      });
     }
   }
-
-  return { task, categories: categoriesMap, images: imagesMap } as UnionDataset;
+  const metadata =
+    task === "pose"
+      ? {
+          task,
+          categories,
+          images: imagesMap,
+          metadata: {
+            categories,
+            train: givenGroupTypes.includes("train") ? "../train" : undefined,
+            test: givenGroupTypes.includes("test") ? "../test" : undefined,
+            val: givenGroupTypes.includes("val") ? "../val" : undefined,
+            n_keypoints: maxNumberOfKeypoints,
+            visibility: "visible",
+          },
+        }
+      : {
+          task,
+          categories,
+          images: imagesMap,
+          metadata: {
+            categories,
+            train: givenGroupTypes.includes("train") ? "../train" : undefined,
+            test: givenGroupTypes.includes("test") ? "../test" : undefined,
+            val: givenGroupTypes.includes("val") ? "../val" : undefined,
+          },
+        };
+  return { task, categories, images: imagesMap, metadata } as UnionDataset;
 }
 
 // ---------------- Pascal VOC ----------------
@@ -684,33 +876,66 @@ async function importCocoDataset(
 //   return { task, categories, images: imagesMap } as DetectDataset;
 // }
 
+async function test() {
+  const task = "detect";
+  const importDatasetPath = `coco-dataset/internal.json`;
+  const getCategoryId = (categoryName: string): number => {
+    return categoryName.charCodeAt(0);
+  };
+  const getImageId = (imageFilename: string): number => {
+    const match = imageFilename.match(/\d+/);
+    return match ? parseInt(match[0], 10) : -1;
+  };
+  const result = await importDataset({
+    task,
+    importDatasetPath,
+    getCategoryId,
+    getImageId,
+  });
+  console.log(result);
+}
+test();
+
 type UnionDataset = ClassifyDataset | DetectDataset | PoseDataset;
 
-type ClassifyDataset = Dataset<"classify", ImageWithLabel>;
-type DetectDataset = Dataset<"detect", ImageWithBox<BoxAnnotation>>;
-type PoseDataset = Dataset<"pose", ImageWithBox<KeypointsAnnotation>>;
+type ClassifyDataset = Dataset<
+  "classify",
+  ImageWithLabel,
+  ClassifyMetadataOptions
+>;
+type DetectDataset = Dataset<
+  "detect",
+  ImageWithBox<BoxAnnotation>,
+  DetectMetadataOptions
+>;
+type PoseDataset = Dataset<
+  "pose",
+  ImageWithBox<KeypointsAnnotation>,
+  PoseMetadataOptions
+>;
 
-type Dataset<Task, Image> = {
+type Dataset<Task, Image, MetadataOptions> = {
   task: Task;
   categories: Map<number, Category>;
   images: Map<number, Image>;
+  metadata: MetadataOptions;
 };
-type Category = {
+export type Category = {
   id: number;
   categoryName: string;
 };
-type ImageWithLabel = {
+export type ImageWithLabel = {
   id: number;
   filename: string;
-  categoryId: number;
+  categoryId: number | number[];
   group: "train" | "val" | "test" | "";
 };
-type ImageWithBox<Annotation> = {
+export type ImageWithBox<Annotation> = {
   id: number;
   filename: string;
   annotations: Annotation[];
 };
-type BoxAnnotation = {
+export type BoxAnnotation = {
   id: number;
   group: "train" | "val" | "test" | "";
   categoryId: number;
@@ -719,7 +944,7 @@ type BoxAnnotation = {
   width: number;
   height: number;
 };
-type KeypointsAnnotation = BoxAnnotation & {
+export type KeypointsAnnotation = BoxAnnotation & {
   keypoints: Keypoint[];
 };
 type Keypoint = {
@@ -745,7 +970,7 @@ type ImportDatasetOptions = {
   importDatasetPath: string | string[];
 };
 
-type ExportDatasetOptions = {
+export type ExportDatasetOptions = {
   importDatasetPath: string | string[];
   dataset: UnionDataset;
   /**
@@ -761,4 +986,24 @@ type ExportDatasetOptions = {
   exportDatasetPath: string | string[];
   format: "yolo" | "coco" | "pascal_voc";
   // ratio
+};
+
+type BaseMetadataOptions = {
+  categories: Map<number, Category>;
+  train?: string;
+  val?: string;
+  test?: string;
+};
+
+type ClassifyMetadataOptions = BaseMetadataOptions & {
+  categoryNames: Map<number, Category>;
+};
+
+type DetectMetadataOptions = BaseMetadataOptions;
+
+type PoseMetadataOptions = BaseMetadataOptions & {
+  keypoint_names?: string[];
+  n_keypoints: number;
+  visibility: "unannotated" | "not_visible" | "visible";
+  flip_idx?: number[]; //TODO: design
 };
