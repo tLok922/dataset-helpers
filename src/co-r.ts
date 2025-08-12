@@ -408,7 +408,7 @@ async function importYoloDataset(args: {
             }
             const annotation = {
               id: annoId + 1,
-              group: groupType as "train" | "test" | "val" | "",
+              groupType: groupType as "train" | "test" | "val" | "",
               categoryId: categoryId,
               x,
               y,
@@ -458,7 +458,7 @@ async function importYoloDataset(args: {
             }
             const annotation = {
               id: annoId + 1,
-              group: groupType as "train" | "test" | "val" | "",
+              groupType: groupType as "train" | "test" | "val" | "",
               categoryId: categoryId,
               x,
               y,
@@ -562,7 +562,7 @@ async function importYoloDataset(args: {
             id: imageId,
             filename,
             categoryId,
-            group: groupType,
+            groupType: groupType,
           });
           classifyIdCounter++;
         }
@@ -707,7 +707,7 @@ async function importCocoDataset(args: {
           id: imageId,
           filename: img.file_name,
           categoryId: categoryIds.length > 1 ? categoryIds : categoryIds[0],
-          group: groupLabel,
+          groupType: groupLabel,
         });
         continue;
       }
@@ -722,7 +722,7 @@ async function importCocoDataset(args: {
 
           const baseAnnotation: BoxAnnotation = {
             id: idx + 1,
-            group: groupLabel,
+            groupType: groupLabel,
             categoryId,
             x,
             y,
@@ -903,11 +903,13 @@ type ClassifyDataset = Dataset<
   ImageWithLabel,
   ClassifyMetadataOptions
 >;
+
 type DetectDataset = Dataset<
   "detect",
   ImageWithBox<BoxAnnotation>,
   DetectMetadataOptions
 >;
+
 type PoseDataset = Dataset<
   "pose",
   ImageWithBox<KeypointsAnnotation>,
@@ -920,38 +922,45 @@ type Dataset<Task, Image, MetadataOptions> = {
   images: Map<number, Image>;
   metadata: MetadataOptions;
 };
+
 export type Category = {
   id: number;
   categoryName: string;
 };
+
 export type ImageWithLabel = {
   id: number;
   filename: string;
   categoryId: number | number[];
-  group: "train" | "val" | "test" | "";
+  groupType: "train" | "val" | "test" | "";
 };
+
 export type ImageWithBox<Annotation> = {
   id: number;
   filename: string;
   annotations: Annotation[];
 };
+
 export type BoxAnnotation = {
   id: number;
-  group: "train" | "val" | "test" | "";
+  groupType: "train" | "val" | "test" | "";
   categoryId: number;
   x: number;
   y: number;
   width: number;
   height: number;
 };
+
 export type KeypointsAnnotation = BoxAnnotation & {
   keypoints: Keypoint[];
 };
-type Keypoint = {
+
+export type Keypoint = {
   x: number;
   y: number;
   visibility: "unannotated" | "not_visible" | "visible";
 };
+
 type ImportDatasetOptions = {
   /**
    * For yolo:
@@ -985,6 +994,11 @@ export type ExportDatasetOptions = {
    */
   exportDatasetPath: string | string[];
   format: "yolo" | "coco" | "pascal_voc";
+  dispatch_group?: (options: {
+    group_type: GroupType | "";
+    class_name: string;
+    filename: string;
+  }) => GroupType;
   // ratio
 };
 

@@ -174,7 +174,6 @@ export async function exportDataset(options: ExportDatasetOptions) {
 
   async function create_dirs_and_data_yaml(group_types: string[]) {
     const { task, metadata } = options;
-    const { class_names } = metadata;
     // to create empty dirs for empty group types/classes and create data.yaml
 
     //update paths for data.yaml

@@ -155,15 +155,15 @@ export type ClassifyYamlOptions = BaseYamlOptions & {
 };
 
 export type DetectYamlOptions = BaseYamlOptions & {
-  train_path: string;
-  val_path: string;
-  test_path: string;
+  // train_path: string;
+  // val_path: string;
+  // test_path: string;
 };
 
 export type PoseYamlOptions = BaseYamlOptions & {
-  train_path: string;
-  val_path: string;
-  test_path: string;
+  // train_path: string;
+  // val_path: string;
+  // test_path: string;
   keypoint_names?: string[];
   n_keypoints: number;
   visibility: boolean;
