@@ -51,9 +51,9 @@ function isBetweenZeroAndOne(value: number): boolean {
 
 function validateCategoryId(options: {
   categoryId: number;
-  nClass: number;
+  nCategory: number;
 }): void {
-  const { categoryId: class_idx, nClass: n_class } = options;
+  const { categoryId: class_idx, nCategory: n_class } = options;
   if (class_idx < 0 || class_idx >= n_class) {
     throw new Error(
       `Invalid class index: receive ${class_idx} but expect a range of [0,${
@@ -85,7 +85,7 @@ function validateBoundingBox(box: {
 
 type BoundingBoxLabelStringOptions = {
   categoryId: number;
-  nClass: number;
+  nCategory: number;
   x: number;
   y: number;
   width: number;
@@ -102,10 +102,12 @@ type BoundingBoxWithKeypointsLabelStringOptions =
 export function toYoloBoundingBoxLabelString(
   args: BoundingBoxLabelStringOptions
 ): string {
-  const { categoryId, x, y, width, height, nClass } = args;
-  validateCategoryId({ categoryId, nClass });
+  const { categoryId, x, y, width, height, nCategory } = args;
+  validateCategoryId({ categoryId, nCategory });
   validateBoundingBox(args);
-  return `${categoryId} ${x} ${y} ${width} ${height}`;
+  return `${categoryId} ${x.toFixed(3)} ${y.toFixed(3)} ${width.toFixed(
+    3
+  )} ${height.toFixed(3)}`;
 }
 
 export function toYoloBoundingBoxWithKeypointsLabelString(
@@ -125,7 +127,7 @@ export function toYoloBoundingBoxWithKeypointsLabelString(
   }
 
   for (const keypoint of keypoints) {
-    label += ` ${keypoint.x} ${keypoint.y}`;
+    label += ` ${keypoint.x.toFixed(3)} ${keypoint.y.toFixed(3)}`;
     label += hasVisibility ? ` ${keypoint.visibility}` : ``;
   }
   return label;
