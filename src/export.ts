@@ -1,13 +1,18 @@
 import { join, dirname, basename, extname } from "path";
-import { copyFile, readFile, writeFile, appendFile } from "fs/promises";
+import { copyFile, readFile, writeFile, appendFile, stat } from "fs/promises";
 import { existsSync } from "fs";
 
-import { cachedMkdir, ExportClassifyDatasetOptions } from "./fs";
+import {
+  cachedCopyFiles,
+  cachedMkdir,
+  ExportClassifyDatasetOptions,
+} from "./fs";
 import { group_types as groupTypes, GroupType } from "./group";
 import {
   ExportDatasetOptions,
   BoxAnnotation,
   KeypointsAnnotation,
+  Category,
 } from "./co-r";
 import { dispatchGroup } from "./split";
 import { toClassifyDataYamlString, toDataYamlString } from "./yaml";
@@ -16,6 +21,15 @@ import {
   toYoloBoundingBoxLabelString,
   toYoloBoundingBoxWithKeypointsLabelString,
 } from "./label-r";
+import { group } from "console";
+
+type Sample = {
+  imageId: number;
+  filename: string;
+  categoryName: string;
+  groupType: GroupType | "";
+  annotation: BoxAnnotation | KeypointsAnnotation;
+};
 
 export async function exportDatasetHelper<
   Sample extends {
@@ -27,7 +41,7 @@ export async function exportDatasetHelper<
   }
 >(options: {
   generateSampleSequence(): Iterable<Sample>;
-  dispatchGroup?: (options: {
+  dispatchGroupToCall?: (options: {
     sample: Sample;
     current: Record<GroupType, number>;
   }) => GroupType;
@@ -36,11 +50,15 @@ export async function exportDatasetHelper<
     groupType: GroupType;
   }) => Promise<void>;
   createDirsAndMetadata?: (
-    groupTypes: string[]
+    groupTypes: (GroupType | "")[]
   ) => Promise<"saved" | "no change" | undefined>;
 }) {
   const sampleIterator = options.generateSampleSequence();
-  const { saveSample, dispatchGroup, createDirsAndMetadata } = options;
+  const {
+    saveSample,
+    dispatchGroupToCall: dispatchGroup,
+    createDirsAndMetadata,
+  } = options;
 
   const groupTypes: GroupType[] = [];
   const currentRatioByClass: Record<
@@ -58,6 +76,7 @@ export async function exportDatasetHelper<
       groupType = dispatchGroup({ sample, current });
       current[groupType]++;
     } else {
+      //TODO: add support for coco no group type //BUG
       groupType = sample.groupType as GroupType;
     }
 
@@ -77,11 +96,11 @@ export async function exportDataset(args: ExportDatasetOptions) {
   const format = args.format;
   switch (format) {
     case "yolo": {
-      exportYoloDataset(args);
+      // exportYoloDataset(args);
       break;
     }
     case "coco": {
-      //exportCocoDataset(args)
+      exportCocoDataset(args);
       break;
     }
     case "pascal_voc": {
@@ -94,23 +113,396 @@ export async function exportDataset(args: ExportDatasetOptions) {
   console.log("Exported dataset");
 }
 
-export async function exportYoloDataset(args: ExportDatasetOptions) {
-  type Sample = {
-    imageId: number;
-    filename: string;
-    categoryName: string;
-    groupType: GroupType | "";
-    annotation: BoxAnnotation | KeypointsAnnotation;
-  };
+function validatePaths(args: {
+  importImageDirs: string | Partial<Record<GroupType, string>>;
+  importMetadataPaths: string | Partial<Record<GroupType, string>>;
+  exportImageDirs: string | Partial<Record<GroupType, string>>;
+  exportMetadataPaths: string | Partial<Record<GroupType, string>>;
+  groupRatio?: Record<GroupType, number>;
+  dispatchGroup?: boolean;
+}) {
+  const {
+    importImageDirs,
+    importMetadataPaths,
+    exportImageDirs,
+    exportMetadataPaths,
+    groupRatio,
+    dispatchGroup,
+  } = args;
 
-  const { dataset, importDatasetPath, exportDatasetPath } = args;
+  // 1. Validate import dir ↔ metadata type consistency
+  for (const groupType of groupTypes) {
+    if (
+      typeof importImageDirs === "string" ||
+      typeof importMetadataPaths === "string"
+    ) {
+      if (typeof importImageDirs !== typeof importMetadataPaths) {
+        throw new Error(
+          `Mismatch between type of importMetadataPaths and importImageDirs`
+        );
+      }
+    } else {
+      if (
+        typeof importImageDirs[groupType] !==
+        typeof importMetadataPaths[groupType]
+      ) {
+        throw new Error(
+          `Mismatch between ${groupType} type of importMetadataPaths and importImageDirs`
+        );
+      }
+    }
+  }
+
+  // 2. Validate export dir ↔ metadata type consistency
+  for (const groupType of groupTypes) {
+    if (
+      typeof exportImageDirs === "string" ||
+      typeof exportMetadataPaths === "string"
+    ) {
+      if (typeof exportImageDirs !== typeof exportMetadataPaths) {
+        throw new Error(
+          `Mismatch between type of exportMetadataPaths and exportImageDirs`
+        );
+      }
+    } else {
+      if (
+        typeof exportImageDirs[groupType] !==
+        typeof exportMetadataPaths[groupType]
+      ) {
+        throw new Error(
+          `Mismatch of ${groupType} option between exportMetadataPaths and exportImageDirs`
+        );
+      }
+    }
+  }
+
+  // 3. Validate groupRatio or import/export mirroring
+  if (
+    !dispatchGroup &&
+    typeof exportImageDirs !== "string" &&
+    typeof exportMetadataPaths !== "string"
+  ) {
+    if (groupRatio) {
+      // Case 1: groupRatio provided
+      for (const groupType of groupTypes) {
+        const groupTypeRatio = groupRatio[groupType] ?? 0;
+
+        if (
+          groupTypeRatio > 0 &&
+          (!exportImageDirs[groupType] || !exportMetadataPaths[groupType])
+        ) {
+          throw new Error(
+            `Group type "${groupType}" has a ratio in groupRatio but is missing exportImageDirs or exportMetadataPaths`
+          );
+        }
+      }
+    } else {
+      // Case 2: groupRatio not provided, export paths must mirror groups of import paths
+      if (
+        typeof importImageDirs !== "string" &&
+        typeof importMetadataPaths !== "string"
+      ) {
+        for (const groupType of groupTypes) {
+          if (importImageDirs[groupType] || importMetadataPaths[groupType]) {
+            if (
+              !exportImageDirs[groupType] ||
+              !exportMetadataPaths[groupType]
+            ) {
+              throw new Error(
+                `Group type "${groupType}" exists in import paths but is missing in exportImageDirs or exportMetadataPaths`
+              );
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+
+// export async function exportYoloDataset(args: ExportDatasetOptions) {
+//   const {
+//     dataset,
+//     importDatasetPath,
+//     exportDatasetPath,
+//     dispatchGroup: customDispatchGroup,
+//     groupRatio,
+//   } = args;
+//   const { categories, images, metadata, task } = dataset;
+//   const importDatasetDir = (
+//     await stat(
+//       dirname(
+//         Array.isArray(importDatasetPath)
+//           ? importDatasetPath[0]
+//           : importDatasetPath
+//       )
+//     )
+//   ).isDirectory()
+//     ? dirname(
+//         Array.isArray(importDatasetPath)
+//           ? importDatasetPath[0]
+//           : importDatasetPath
+//       )
+//     : dirname(
+//         dirname(
+//           Array.isArray(importDatasetPath)
+//             ? importDatasetPath[0]
+//             : importDatasetPath
+//         )
+//       );
+
+//   const exportDatasetDir = Array.isArray(exportDatasetPath)
+//     ? exportDatasetPath[0]
+//     : exportDatasetPath;
+
+//   function* generateSampleSequence(): Iterable<Sample> {
+//     if (task === "classify") {
+//       for (const [imageId, image] of images) {
+//         const categoryIds = Array.isArray(image.categoryId)
+//           ? image.categoryId
+//           : [image.categoryId];
+//         for (const categoryId of categoryIds) {
+//           const categoryName =
+//             categories.get(categoryId)?.categoryName ?? `${categoryId}`;
+//           yield {
+//             imageId,
+//             filename: image.filename,
+//             categoryName,
+//             groupType: image.groupType,
+//             annotation: Object.create(null),
+//           };
+//         }
+//       }
+//     } else {
+//       for (const [imageId, image] of images) {
+//         for (const annotation of image.annotations) {
+//           const categoryName =
+//             categories.get(annotation.categoryId)?.categoryName ??
+//             `${annotation.categoryId}`;
+//           yield {
+//             imageId,
+//             filename: image.filename,
+//             categoryName,
+//             groupType: annotation.groupType,
+//             annotation: annotation,
+//           };
+//         }
+//       }
+//     }
+//   }
+
+//   async function saveSample(args: { sample: Sample; groupType: GroupType }) {
+//     const { sample, groupType: exportGroupType } = args;
+//     const {
+//       imageId,
+//       filename,
+//       categoryName,
+//       groupType: importGroupType,
+//     } = sample;
+//     if (task === "pose" || task === "detect") {
+//       const { annotation } = sample;
+//       const labelFilename = basename(filename, extname(filename)) + ".txt";
+
+//       const imagesSrcDir = join(importDatasetDir, importGroupType, "images");
+//       const imagesDestDir = join(exportDatasetDir, exportGroupType, "images");
+//       const labelsDestDir = join(exportDatasetDir, exportGroupType, "labels");
+
+//       await cachedMkdir(imagesDestDir);
+//       const imageSrcPath = join(imagesSrcDir, filename);
+//       const imageDestPath = join(imagesDestDir, filename);
+//       await copyFile(imageSrcPath, imageDestPath);
+
+//       await cachedMkdir(labelsDestDir);
+//       const labelDestPath = join(labelsDestDir, labelFilename);
+//       let labelStr = "";
+
+//       if (task === "detect") {
+//         labelStr = toYoloBoundingBoxLabelString({
+//           ...annotation,
+//           nCategory: categories.size,
+//         });
+//       } else if (task === "pose") {
+//         const { keypoints } = annotation as KeypointsAnnotation;
+//         labelStr = toYoloBoundingBoxWithKeypointsLabelString({
+//           ...annotation,
+//           nCategory: categories.size,
+//           nKeypoints: metadata.n_keypoints,
+//           hasVisibility: metadata.visibility !== "unannotated",
+//           keypoints,
+//         });
+//       } else throw new Error(`Invalid task type: receive ${task}`);
+
+//       if (!existsSync(labelDestPath)) {
+//         //if txt file does not exist, create txt file
+//         await writeFile(labelDestPath, labelStr);
+//       } else {
+//         //else add line to txt file
+//         await appendFile(labelDestPath, "\n" + labelStr);
+//       }
+//       return;
+//     }
+//     if (task === "classify") {
+//       const srcFile = join(
+//         importDatasetDir,
+//         importDatasetDir,
+//         categoryName,
+//         filename
+//       );
+//       const destFile = join(
+//         exportDatasetDir,
+//         exportGroupType,
+//         categoryName,
+//         filename
+//       );
+
+//       await cachedMkdir(dirname(destFile));
+//       await copyFile(srcFile, destFile);
+//       return;
+//     }
+//     throw new Error(`Unsupported task type: receive "${task}"`);
+//   }
+
+//   let dispatchGroupToCall:
+//     | ((options: {
+//         sample: Sample;
+//         current: Record<GroupType, number>;
+//       }) => GroupType)
+//     | undefined;
+
+//   if (customDispatchGroup) {
+//     dispatchGroupToCall = ({ sample }) => customDispatchGroup(sample);
+//   } else if (groupRatio) {
+//     dispatchGroupToCall = ({ current }) =>
+//       dispatchGroup({ current, target: groupRatio });
+//   }
+//   async function createDirsAndMetadata(
+//     groupTypes: string[]
+//   ): Promise<"saved" | "no change" | undefined> {
+//     const categoryNames = Array.from(categories.values()).map(
+//       (category) => category.categoryName
+//     );
+//     if (groupTypes.includes("")) {
+//       metadata.train = undefined;
+//       metadata.test = undefined;
+//       metadata.val = undefined;
+//     } else {
+//       metadata.train = groupTypes.includes("train") ? "../train" : undefined;
+//       metadata.test = groupTypes.includes("test") ? "../test" : undefined;
+//       metadata.val = groupTypes.includes("val") ? "../val" : undefined;
+//     }
+//     if (task === "classify") {
+//       for (const groupType of groupTypes) {
+//         for (const categoryName of categoryNames) {
+//           const exportDirPath = join(exportDatasetDir, groupType, categoryName);
+//           await cachedMkdir(exportDirPath);
+//         }
+//       }
+//       const newContent = toClassifyDataYamlString({
+//         train_path: metadata.train,
+//         test_path: metadata.test,
+//         val_path: metadata.val,
+//         n_class: categories.size,
+//         class_names: categoryNames,
+//       });
+//       const yamlPath = join(exportDatasetDir, "data.yaml");
+//       if (existsSync(yamlPath)) {
+//         const oldContent = await readFile(yamlPath).toString();
+//         if (newContent === oldContent) return "no change";
+//       }
+//       await writeFile(yamlPath, newContent);
+//       return "saved";
+//     }
+//     if (task === "pose" || task === "detect") {
+//       for (const groupType of groupTypes) {
+//         const exportDirImagesPath = join(exportDatasetDir, groupType, "images");
+//         const exportDirLabelsPath = join(exportDatasetDir, groupType, "labels");
+//         await cachedMkdir(exportDirImagesPath);
+//         await cachedMkdir(exportDirLabelsPath);
+//       }
+//       let yamlMetadata;
+//       if (task === "pose") {
+//         yamlMetadata = {
+//           train_path: metadata.train,
+//           test_path: metadata.test,
+//           val_path: metadata.val,
+//           class_names: categoryNames,
+//           n_class: categories.size,
+//           keypoint_names: metadata.keypoint_names,
+//           n_keypoints: metadata.n_keypoints,
+//           visibility: metadata.visibility !== "unannotated",
+//           flip_idx: metadata.flip_idx,
+//         };
+//       } else {
+//         yamlMetadata = {
+//           train_path: metadata.train,
+//           test_path: metadata.test,
+//           val_path: metadata.val,
+//           class_names: categoryNames,
+//           n_class: categories.size,
+//         };
+//       }
+//       const newContent = toDataYamlString(task, yamlMetadata);
+//       const yamlPath = join(exportDatasetDir, "data.yaml");
+//       if (existsSync(yamlPath)) {
+//         const oldContent = await readFile(yamlPath).toString();
+//         if (newContent === oldContent) return "no change";
+//       }
+
+//       await writeFile(yamlPath, newContent);
+//       return "saved";
+//     }
+//     throw new Error(`Unsupported task provided: ${task}`);
+//   }
+
+//   await exportDatasetHelper<Sample>({
+//     generateSampleSequence,
+//     saveSample,
+//     dispatchGroupToCall,
+//     createDirsAndMetadata,
+//   });
+
+//   console.log(`Exported YOLO dataset (task: ${task})`);
+// }
+
+type CocoJsonFormat = {
+  categories:
+    | {
+        id: number;
+        name: string;
+      }[]
+    | {
+        id: number;
+        name: string;
+        keypoints?: string[];
+        skeleton?: number[];
+      }[];
+  images: { id: number; file_name: string }[];
+  annotations: {
+    id: number;
+    image_id: number;
+    category_id: number;
+    bbox?: number[];
+    keypoints?: number[];
+  }[];
+};
+export async function exportCocoDataset(args: ExportDatasetOptions) {
+  const {
+    dataset,
+    importMetadataPaths,
+    importImageDirs,
+    exportMetadataPaths,
+    exportImageDirs,
+    dispatchGroup: customDispatchGroup,
+    groupRatio,
+  } = args;
   const { categories, images, metadata, task } = dataset;
-  const importDatasetDir = Array.isArray(importDatasetPath)
-    ? dirname(importDatasetPath[0])
-    : dirname(importDatasetPath);
-  const exportDatasetDir = Array.isArray(exportDatasetPath)
-    ? exportDatasetPath[0]
-    : exportDatasetPath;
+  const isGroupKey = (key: string): key is GroupType =>
+    key === "train" || key === "test" || key === "val";
+
+  validatePaths({importImageDirs, importMetadataPaths, exportImageDirs, exportMetadataPaths, groupRatio, dispatchGroup: !!customDispatchGroup});
+
+  const jsonObjects: Record<GroupType | "", CocoJsonFormat> =
+    Object.create(null);
 
   function* generateSampleSequence(): Iterable<Sample> {
     if (task === "classify") {
@@ -132,253 +524,173 @@ export async function exportYoloDataset(args: ExportDatasetOptions) {
       }
     } else {
       for (const [imageId, image] of images) {
-        for (const annotation of image.annotations) {
-          const categoryName =
-            categories.get(annotation.categoryId)?.categoryName ??
-            `${annotation.categoryId}`;
-          yield {
-            imageId,
-            filename: image.filename,
-            categoryName,
-            groupType: annotation.groupType,
-            annotation: annotation,
-          };
-        }
+        if (image.annotations) {
+          for (const annotation of image.annotations) {
+            const categoryName =
+              categories.get(annotation.categoryId)?.categoryName ??
+              `${annotation.categoryId}`;
+            yield {
+              imageId,
+              filename: image.filename,
+              categoryName,
+              groupType: annotation.groupType,
+              annotation: annotation,
+            };
+          }
+        } else
+          throw new Error(
+            `Image annotations are missing for ${image.filename} with ID ${imageId} (task: "${task}")`
+          );
       }
     }
   }
 
-  async function saveSample(args: { sample: Sample; groupType: GroupType }) {
-    const { sample, groupType: exportGroupType } = args;
-    const {
-      imageId,
-      filename,
-      categoryName,
-      groupType: importGroupType,
-    } = sample;
-    if (task === "pose" || task === "detect") {
-      const { annotation } = sample;
-      const labelFilename = basename(filename, extname(filename)) + ".txt";
+  async function saveSample(args: {
+    sample: Sample;
+    groupType: GroupType | "";
+  }) {
+    const { sample } = args;
+    //Override groupType if export image dirs is a string
+    const groupType = typeof exportImageDirs === "string" ? "" : args.groupType;
+    const importImageDir =
+      typeof importImageDirs === "string"
+        ? importImageDirs
+        : sample.groupType && isGroupKey(sample.groupType)
+        ? importImageDirs[sample.groupType]
+        : undefined;
+    const exportImageDir =
+      typeof exportImageDirs === "string"
+        ? exportImageDirs
+        : groupType && isGroupKey(groupType)
+        ? exportImageDirs[groupType]
+        : undefined;
+    if (!importImageDir || !exportImageDir) {
+      throw new Error(
+        `Invalid import or export image directory for group type "${sample.groupType}"`
+      );
+    }
 
-      const imagesSrcDir = join(importDatasetDir, importGroupType, "images");
-      const imagesDestDir = join(exportDatasetDir, exportGroupType, "images");
-      const labelsDestDir = join(exportDatasetDir, exportGroupType, "labels");
+    const importImagePath = join(importImageDir, sample.filename);
+    const exportImagePath = join(exportImageDir, sample.filename);
+    // Ensure the image file exists before copying
+    await cachedMkdir(exportImageDir);
+    await cachedCopyFiles(importImagePath, exportImagePath);
 
-      await cachedMkdir(imagesDestDir);
-      const imageSrcPath = join(imagesSrcDir, filename);
-      const imageDestPath = join(imagesDestDir, filename);
-      await copyFile(imageSrcPath, imageDestPath);
+    if (!(groupType in jsonObjects)) {
+      jsonObjects[groupType] = {
+        categories: Array.from(categories, ([categoryId, category]) => ({
+          id: categoryId,
+          name: category.categoryName,
+          keypoints: category.keypoints,
+          skeleton: category.skeleton,
+          flip_idx: category.flip_idx,
+        })),
+        images: [],
+        annotations: [],
+      };
+    }
 
-      await cachedMkdir(labelsDestDir);
-      const labelDestPath = join(labelsDestDir, labelFilename);
-      let labelStr = "";
+    if (
+      !jsonObjects[groupType].images.some((img) => img.id === sample.imageId)
+    ) {
+      jsonObjects[groupType].images.push({
+        id: sample.imageId,
+        file_name: sample.filename,
+      });
+    }
 
-      if (task === "detect") {
-        labelStr = toYoloBoundingBoxLabelString({
-          ...annotation,
-          nClass: categories.size,
+    if (task === "classify") {
+      jsonObjects[groupType].annotations.push({
+        id: sample.annotation.id,
+        image_id: sample.imageId,
+        category_id: sample.annotation.categoryId,
+      });
+    } else {
+      //TODO: confirm .toFixed(3) implementation
+      const bbox = [
+        sample.annotation.x,
+        sample.annotation.y,
+        sample.annotation.width,
+        sample.annotation.height,
+      ];
+      if (!(sample.annotation as KeypointsAnnotation).keypoints) {
+        jsonObjects[groupType].annotations.push({
+          id: sample.annotation.id,
+          image_id: sample.imageId,
+          category_id: sample.annotation.categoryId,
+          bbox,
         });
-      } else if (task === "pose") {
-        const { keypoints } = annotation as KeypointsAnnotation;
-        labelStr = toYoloBoundingBoxWithKeypointsLabelString({
-          ...annotation,
-          nClass: categories.size,
-          nKeypoints: metadata.n_keypoints,
-          hasVisibility: metadata.visibility !== "unannotated",
+      } else {
+        const keypoints = (sample.annotation as KeypointsAnnotation).keypoints
+          .map((k) => [
+            k.x,
+            k.y,
+            k.visibility === "unannotated"
+              ? 0
+              : k.visibility === "not_visible"
+              ? 1
+              : 2,
+          ])
+          .flat();
+
+        jsonObjects[groupType].annotations.push({
+          id: sample.annotation.id,
+          image_id: sample.imageId,
+          category_id: sample.annotation.categoryId,
+          bbox,
           keypoints,
         });
-      } else throw new Error(`Invalid task type: receive ${task}`);
-
-      if (!existsSync(labelDestPath)) {
-        //if txt file does not exist, create txt file
-        await writeFile(labelDestPath, labelStr);
-      } else {
-        //else add line to txt file
-        await appendFile(labelDestPath, "\n" + labelStr);
       }
-      return;
     }
-    if (task === "classify") {
-      const srcFile = join(
-        importDatasetDir,
-        importDatasetDir,
-        categoryName,
-        filename
-      );
-      const destFile = join(
-        exportDatasetDir,
-        exportGroupType,
-        categoryName,
-        filename
-      );
-
-      await cachedMkdir(dirname(destFile));
-      await copyFile(srcFile, destFile);
-      return;
-    }
-    throw new Error(`Unsupported task type: receive "${task}"`);
   }
 
-  //   let dispatch_group: ((options: { sample: Sample; current: Record<GroupType, number> }) => GroupType) | undefined;
+  let dispatchGroupToCall:
+    | ((options: {
+        sample: Sample;
+        current: Record<GroupType, number>;
+      }) => GroupType)
+    | undefined;
 
-  //   if (custom_dispatch_group) {
-  //     dispatch_group = ({ sample }) => custom_dispatch_group(sample);
-  //   } else if (group_ratio) {
-  //     dispatch_group = ({ current }) => dispatchGroup({ current, target: group_ratio });
-  //   }
+  if (customDispatchGroup) {
+    dispatchGroupToCall = ({ sample }) => customDispatchGroup(sample);
+  } else if (groupRatio) {
+    dispatchGroupToCall = ({ current }) =>
+      dispatchGroup({ current, target: groupRatio });
+  }
+
   async function createDirsAndMetadata(
-    groupTypes: string[]
+    groupTypes: (GroupType | "")[]
   ): Promise<"saved" | "no change" | undefined> {
-    const categoryNames = Array.from(categories.values()).map(
-      (category) => category.categoryName
-    );
-    if (groupTypes.includes("")) {
-      metadata.train = undefined;
-      metadata.test = undefined;
-      metadata.val = undefined;
-    } else {
-      metadata.train = groupTypes.includes("train") ? "../train" : undefined;
-      metadata.test = groupTypes.includes("test") ? "../test" : undefined;
-      metadata.val = groupTypes.includes("val") ? "../val" : undefined;
-    }
-    if (task === "classify") {
-      for (const groupType of groupTypes) {
-        for (const categoryName of categoryNames) {
-          const exportDirPath = join(exportDatasetDir, groupType, categoryName);
-          await cachedMkdir(exportDirPath);
-        }
-      }
-      const newContent = toClassifyDataYamlString({
-        train_path: metadata.train,
-        test_path: metadata.test,
-        val_path: metadata.val,
-        n_class: categories.size,
-        class_names: categoryNames,
-      });
-      const yamlPath = join(exportDatasetDir, "data.yaml");
-      if (existsSync(yamlPath)) {
-        const oldContent = await readFile(yamlPath).toString();
-        if (newContent === oldContent) return "no change";
-      }
-      await writeFile(yamlPath, newContent);
+    //Override groupType if export image dirs is a string
+    if (typeof exportMetadataPaths === "string") {
+      const jsonStr = JSON.stringify(jsonObjects[""]);
+      await writeFile(exportMetadataPaths, jsonStr);
       return "saved";
     }
-    if (task === "pose" || task === "detect") {
-      for (const groupType of groupTypes) {
-        const exportDirImagesPath = join(exportDatasetDir, groupType, "images");
-        const exportDirLabelsPath = join(exportDatasetDir, groupType, "labels");
-        await cachedMkdir(exportDirImagesPath);
-        await cachedMkdir(exportDirLabelsPath);
+    for (const groupType of groupTypes) {
+      const exportMetadataPath =
+        typeof exportMetadataPaths === "string"
+          ? exportMetadataPaths
+          : groupType && isGroupKey(groupType)
+          ? exportMetadataPaths[groupType]
+          : undefined;
+      if (!exportMetadataPath) {
+        throw new Error(
+          `Invalid import or export image directory for group type "${groupType}"`
+        );
       }
-      let yamlMetadata;
-      if (task === "pose") {
-        yamlMetadata = {
-          train_path: metadata.train,
-          test_path: metadata.test,
-          val_path: metadata.val,
-          class_names: categoryNames,
-          n_class: categories.size,
-          keypoint_names: metadata.keypoint_names,
-          n_keypoints: metadata.n_keypoints,
-          visibility: metadata.visibility !== "unannotated",
-          flip_idx: metadata.flip_idx,
-        };
-      } else {
-        yamlMetadata = {
-          train_path: metadata.train,
-          test_path: metadata.test,
-          val_path: metadata.val,
-          class_names: categoryNames,
-          n_class: categories.size,
-        };
-      }
-      const newContent = toDataYamlString(task, yamlMetadata);
-      const yamlPath = join(exportDatasetDir, "data.yaml");
-      if (existsSync(yamlPath)) {
-        const oldContent = await readFile(yamlPath).toString();
-        if (newContent === oldContent) return "no change";
-      }
-
-      await writeFile(yamlPath, newContent);
-      return "saved";
+      const jsonStr = JSON.stringify(jsonObjects[groupType]);
+      await writeFile(exportMetadataPath, jsonStr);
     }
-    throw new Error(`Unsupported task provided: ${task}`);
+    return "saved";
   }
 
   await exportDatasetHelper<Sample>({
     generateSampleSequence,
     saveSample,
-    // dispatchGroup,
+    dispatchGroupToCall,
     createDirsAndMetadata,
   });
 
-  console.log(`Exported YOLO dataset (task: ${task})`);
+  console.log(`Exported COCO dataset (task: ${task})`);
 }
-
-// export async function exportCocoDataset(options: ExportDatasetOptions) {
-//   // Coco dataset export implementation here...
-//   // This should use types from co-r.ts similarly and save JSON files for annotations, images, categories, etc.
-
-//   // Since COCO is more complex, the main difference is saving the COCO JSON files instead of txt labels.
-
-//   // The skeleton code below illustrates structure:
-
-//   const {
-//     task,
-//     bounding_box_groups,
-//     metadata,
-//     import_dataset_dir,
-//     dataset_dir: export_dataset_dir,
-//     group_ratio,
-//     dispatch_group: custom_dispatch_group,
-//   } = options;
-
-//   const { class_names } = metadata;
-
-//   type Sample = {
-//     group_type: GroupType;
-//     class_name: string;
-//     filename: string;
-//     box: BoxAnnotation | KeypointsAnnotation;
-//   };
-
-//   // You would build up COCO images, annotations, and categories JSON here from samples
-
-//   // For brevity, I'll provide a simplified placeholder structure.
-
-//   console.warn("exportCocoDataset not fully implemented; please implement as needed.");
-
-//   // You can reuse exportDatasetHelper with customized save_sample and create_dirs_and_data_yaml accordingly.
-
-//   // To fully implement: collect all samples, convert to COCO JSON format, write annotations JSON files, and copy images.
-
-//   // This is just a stub to keep interface consistent.
-
-//   await exportDatasetHelper<Sample>({
-//     generate_sample_sequence: function* () {
-//       for (const [group_type_str, image_label_dict] of Object.entries(bounding_box_groups)) {
-//         const group_type = group_type_str as GroupType;
-//         for (const [filename, boxes] of Object.entries(image_label_dict)) {
-//           for (const box of boxes) {
-//             const class_name = class_names ? class_names[box.class_idx] : `${box.class_idx}`;
-//             yield { group_type, class_name, filename, box };
-//           }
-//         }
-//       }
-//     },
-//     save_sample: async ({ sample, group_type }) => {
-//       // You'd typically accumulate data for COCO JSON files here, or save images as needed.
-//       // Left as TODO.
-//     },
-//     dispatch_group: custom_dispatch_group
-//       ? ({ sample }) => custom_dispatch_group(sample)
-//       : group_ratio
-//       ? ({ current }) => dispatchGroup({ current, target: group_ratio })
-//       : undefined,
-//     create_dirs_and_data_yaml: async (group_types: GroupType[]) => {
-//       // Create directories for images, write COCO json files here
-//       // Left as TODO
-//       return undefined;
-//     },
-//   });
-// }

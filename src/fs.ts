@@ -378,6 +378,13 @@ export async function cachedMkdir(dir: string) {
   created_dirs.add(dir);
 }
 
+let created_image_files = new Set<string>();
+export async function cachedCopyFiles(import_path: string, export_path: string) {
+  if (created_image_files.has(export_path)) return;
+  await copyFile(import_path, export_path);
+  created_image_files.add(export_path);
+}
+
 // ==================== Dataset Options Types ====================
 export type DatasetOptions = DetectDatasetOptions | PoseDatasetOptions;
 

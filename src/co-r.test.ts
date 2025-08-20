@@ -1,70 +1,59 @@
 import { importDataset } from "./co-r";
-import { exportYoloDataset } from "./export";
+import { exportCocoDataset } from "./export";
 
 async function test() {
   const task = "pose";
+  const format = "coco";
   const group_ratio = { train: 7, test: 2, val: 1 };
-
-  const importDatasetPath = "cat-pose-dataset_kpt6/data.yaml";
-  const exportDatasetPath = "cat-pose-dataset_kpt6-2";
-
-  const importDatasetPath2 = "cat-pose-dataset_kpt6-2/data.yaml";
-  const exportDatasetPath2 = "cat-pose-dataset_kpt6-3";
-
-  /**********************************************/
-  /* copy dataset from import_dir to export_dir */
-  /**********************************************/
-  // const result = await importClassifyDataset({ dataset_dir: import_dir });
-  // await exportClassifyDataset({
-  //   ...result,
-  //   import_dataset_dir: import_dir,
-  //   dataset_dir: export_dir,
-  //   // group_ratio,
-  //   // TODO: add train/test/val split
-  //   // dispatch_group(options) {
-  //   //     // if(options.filename.includes("user-1-")){
-  //   //     //   return 'train'
-  //   //     // }
-  //   //     return Math.random()<1/3 ? 'train':'test'
-  //   // },
-  // });
-
-  // const result2 = await importClassifyDataset({ dataset_dir: import_dir_2 });
-  // await exportClassifyDataset({
-  //   ...result2,
-  //   import_dataset_dir: import_dir_2,
-  //   dataset_dir: export_dir_2,
-  //   group_ratio,
-  //   // TODO: add train/test/val split
-  //   dispatch_group(options) {
-  //       // if(options.filename.includes("user-1-")){
-  //       //   return 'train'
-  //       // }
-  //       return Math.random()<1/3 ? 'train':'test'
-  //   },
-  // });
-
+  // const imageDirs = "coco-dataset/data";
+  // const metadataPaths = "coco-dataset/internal.json";
+  const imageDirs = {
+    train: "coco-dataset-groups/train",
+    val: "coco-dataset-groups/valid",
+    test: "coco-dataset-groups/test",
+  };
+  const metadataPaths = {
+    train: "coco-dataset-groups/train/_annotations.coco.json",
+    val: "coco-dataset-groups/valid/_annotations.coco.json",
+    test: "coco-dataset-groups/test/_annotations.coco.json",
+  };
+  // const exportImageDirs = "coco-dataset-groups2/data"
+  // const exportMetadataPaths = "coco-dataset-groups2/label.json";
+  const exportImageDirs = {
+    train: "coco-dataset-groups2/train",
+    val: "coco-dataset-groups2/valid",
+    test: "coco-dataset-groups2/test",
+  };
+  const exportMetadataPaths = {
+    train: "coco-dataset-groups2/train/_annotations.coco.json",
+    val: "coco-dataset-groups2/valid/_annotations.coco.json",
+    test: "coco-dataset-groups2/test/_annotations.coco.json",
+  };
+  const getCategoryId = (categoryName: string): number => {
+    return categoryName.charCodeAt(0);
+  };
+  const getImageId = (imageFilename: string): number => {
+    const match = imageFilename.match(/\d+/);
+    return match ? parseInt(match[0], 10) : -1;
+  };
   const dataset = await importDataset({
     task,
-    importDatasetPath,
+    format,
+    metadataPaths,
+    imageDirs,
+    // getCategoryId,
+    // getImageId,
   });
-  await exportYoloDataset({
-    importDatasetPath,
-    exportDatasetPath,
+
+  await exportCocoDataset({
+    importMetadataPaths: metadataPaths,
+    importImageDirs: imageDirs,
+    exportImageDirs,
+    exportMetadataPaths,
     dataset,
-    format: "yolo",
+    format,
   });
-  const dataset2 = await importDataset({
-    task,
-    importDatasetPath,
-  });
-  await exportYoloDataset({
-    importDatasetPath:importDatasetPath2,
-    exportDatasetPath:exportDatasetPath2,
-    dataset:dataset2,
-    format: "yolo",
-  });
-  console.log('test complete')
+  console.log("test complete");
 
   // await exportDataset({
   //   task,

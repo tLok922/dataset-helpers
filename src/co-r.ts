@@ -64,23 +64,8 @@ export async function importDataset(
     task: "classify";
     format: "yolo" | "coco" | "pascal_voc";
     missingLabel?: "ignore" | "warn" | "error";
-    metadataPaths:
-      | string
-      | {
-          // e.g. './dataset/train/_annotation.coco.json'
-          train?: string;
-          test?: string;
-          val?: string;
-        };
-    // e.g. './dataset/images' when images of all groups are placed in the same directory
-    imageDirs:
-      | string
-      | {
-          // e.g. './dataset/train'
-          train?: string;
-          test?: string;
-          val?: string;
-        };
+    metadataPaths: string | Partial<Record<GroupType, string>>;
+    imageDirs: string | Partial<Record<GroupType, string>>;
   } & ImportDatasetCallbacks
 ): Promise<ClassifyDataset>;
 export async function importDataset(
@@ -88,23 +73,8 @@ export async function importDataset(
     task: "detect";
     format: "yolo" | "coco" | "pascal_voc";
     missingLabel?: "ignore" | "warn" | "error";
-    metadataPaths:
-      | string
-      | {
-          // e.g. './dataset/train/_annotation.coco.json'
-          train?: string;
-          test?: string;
-          val?: string;
-        };
-    // e.g. './dataset/images' when images of all groups are placed in the same directory
-    imageDirs:
-      | string
-      | {
-          // e.g. './dataset/train'
-          train?: string;
-          test?: string;
-          val?: string;
-        };
+    metadataPaths: string | Partial<Record<GroupType, string>>;
+    imageDirs: string | Partial<Record<GroupType, string>>;
     getAnnotationId?: (annotation: Omit<BoxAnnotation, "id">) => number;
   } & ImportDatasetCallbacks
 ): Promise<DetectDataset>;
@@ -113,23 +83,8 @@ export async function importDataset(
     task: "pose";
     format: "yolo" | "coco" | "pascal_voc";
     missingLabel?: "ignore" | "warn" | "error";
-    metadataPaths:
-      | string
-      | {
-          // e.g. './dataset/train/_annotation.coco.json'
-          train?: string;
-          test?: string;
-          val?: string;
-        };
-    // e.g. './dataset/images' when images of all groups are placed in the same directory
-    imageDirs:
-      | string
-      | {
-          // e.g. './dataset/train'
-          train?: string;
-          test?: string;
-          val?: string;
-        };
+    metadataPaths: string | Partial<Record<GroupType, string>>;
+    imageDirs: string | Partial<Record<GroupType, string>>;
     getAnnotationId?: (annotation: Omit<KeypointsAnnotation, "id">) => number;
   } & ImportDatasetCallbacks
 ): Promise<PoseDataset>;
@@ -138,23 +93,8 @@ export async function importDataset(
     task: "classify" | "detect" | "pose";
     format: "yolo" | "coco" | "pascal_voc";
     missingLabel?: "ignore" | "warn" | "error";
-    metadataPaths:
-      | string
-      | {
-          // e.g. './dataset/train/_annotation.coco.json'
-          train?: string;
-          test?: string;
-          val?: string;
-        };
-    // e.g. './dataset/images' when images of all groups are placed in the same directory
-    imageDirs:
-      | string
-      | {
-          // e.g. './dataset/train'
-          train?: string;
-          test?: string;
-          val?: string;
-        };
+    metadataPaths: string | Partial<Record<GroupType, string>>;
+    imageDirs: string | Partial<Record<GroupType, string>>;
     getAnnotationId?: (annotation: Omit<KeypointsAnnotation, "id">) => number;
   } & ImportDatasetCallbacks
 ): Promise<UnionDataset> {
@@ -770,7 +710,9 @@ export async function importCocoDataset(args: {
   } = args;
 
   const categories = new Map<number, Category>();
+  const categoryIdMap = new Map<number, number>(); //old to new ID mapping
   let internalImageId = 1;
+  let internalAnnotationId = 1;
   let maxNumberOfKeypoints = 0;
 
   // --- Helpers ---
@@ -829,11 +771,10 @@ export async function importCocoDataset(args: {
     } = JSON.parse(await readFile(metadataFile, "utf8"));
 
     // --- Categories ---
-    const categoryIdMap = new Map<number, number>();
     for (const cat of catList) {
       const newId = getCategoryId ? getCategoryId(cat.name) : Number(cat.id);
-      if (categories.has(newId))
-        throw new Error(`Duplicate category ID: ${newId}`);
+      if (categories.has(newId)) continue; // Skip if already exists
+      // throw new Error(`Duplicate category ID: ${newId}`);
       categoryIdMap.set(Number(cat.id), newId);
       categories.set(newId, {
         id: newId,
@@ -850,12 +791,13 @@ export async function importCocoDataset(args: {
       const imageId = getImageId
         ? getImageId(img.file_name)
         : internalImageId++;
+
       if (seenImageIds.has(imageId))
         throw new Error(`Duplicate image ID: ${imageId}`);
       seenImageIds.add(imageId);
 
       // Validate file existence
-      const possiblePath = join(imageDirectory, "data", img.file_name);
+      const possiblePath = join(imageDirectory, img.file_name);
       if (!(await validateFileExists(possiblePath))) {
         logOrThrow(`Image file not found: ${possiblePath}`);
       }
@@ -887,13 +829,13 @@ export async function importCocoDataset(args: {
 
       if (task === "detect" || task === "pose") {
         const seenAnnIds = new Set<number>();
-        const imageAnnotations = annsForImage.map((ann: any, idx: number) => {
+        const imageAnnotations = annsForImage.map((ann: any) => {
           const [x, y, width, height] = ann.bbox; // || [0, 0, 0, 0];
           const categoryId =
             categoryIdMap.get(ann.category_id) ?? ann.category_id;
 
           const baseAnn: BoxAnnotation = {
-            id: idx + 1,
+            id: internalAnnotationId,
             groupType,
             categoryId,
             x,
@@ -904,7 +846,9 @@ export async function importCocoDataset(args: {
 
           const annotationId = getAnnotationId
             ? getAnnotationId({ ...baseAnn, keypoints: [] })
-            : idx + 1;
+            : internalAnnotationId;
+          internalAnnotationId++;
+
           if (seenAnnIds.has(annotationId)) {
             throw new Error(
               `Duplicate annotation ID: ${annotationId} in image ${imageId}`
@@ -1067,29 +1011,39 @@ export async function importCocoDataset(args: {
 //   return { task, categories, images: imagesMap } as DetectDataset;
 // }
 
-async function test() {
-  const task = "detect";
-  const format = "yolo";
-  const imageDirs = "";
-  const metadataPaths = "";
-  const getCategoryId = (categoryName: string): number => {
-    return categoryName.charCodeAt(0);
-  };
-  const getImageId = (imageFilename: string): number => {
-    const match = imageFilename.match(/\d+/);
-    return match ? parseInt(match[0], 10) : -1;
-  };
-  const result = await importDataset({
-    task,
-    format,
-    metadataPaths,
-    imageDirs,
-    getCategoryId,
-    getImageId,
-  });
-  console.log(result);
-}
-test();
+// async function test() {
+//   const task = "pose";
+//   const format = "coco";
+//   // const imageDirs = "coco-dataset/data";
+//   // const metadataPaths = "coco-dataset/internal.json";
+//   const imageDirs = {
+//     train: "coco-dataset-groups/train",
+//     val: "coco-dataset-groups/valid",
+//     test: "coco-dataset-groups/test",
+//   };
+//   const metadataPaths = {
+//     train: "coco-dataset-groups/train/_annotations.coco.json",
+//     val: "coco-dataset-groups/valid/_annotations.coco.json",
+//     test: "coco-dataset-groups/test/_annotations.coco.json",
+//   };
+//   const getCategoryId = (categoryName: string): number => {
+//     return categoryName.charCodeAt(0);
+//   };
+//   const getImageId = (imageFilename: string): number => {
+//     const match = imageFilename.match(/\d+/);
+//     return match ? parseInt(match[0], 10) : -1;
+//   };
+//   const result = await importDataset({
+//     task,
+//     format,
+//     metadataPaths,
+//     imageDirs,
+//     // getCategoryId,
+//     // getImageId,
+//   });
+//   console.log(result);
+// }
+// test();
 
 type UnionDataset = ClassifyDataset | DetectDataset | PoseDataset;
 
@@ -1200,7 +1154,10 @@ type ImportDatasetOptions = {
 };
 
 export type ExportDatasetOptions = {
-  importDatasetPath: string | string[];
+  importMetadataPaths: string | Partial<Record<GroupType, string>>;
+  importImageDirs: string | Partial<Record<GroupType, string>>;
+  exportMetadataPaths: string | Partial<Record<GroupType, string>>;
+  exportImageDirs: string | Partial<Record<GroupType, string>>;
   dataset: UnionDataset;
   /**
    * e.g.
@@ -1212,9 +1169,8 @@ export type ExportDatasetOptions = {
    *   - ./dataset/annotations
    *   - ./export/dataset-11-v12.zip
    */
-  exportDatasetPath: string;
   format: "yolo" | "coco" | "pascal_voc";
-  groupRatio: Record<GroupType, number>;
+  groupRatio?: Record<GroupType, number>;
   dispatchGroup?: (options: {
     groupType: GroupType | "";
     categoryName: string;
