@@ -265,76 +265,76 @@ export async function getBoundingBoxesOfOneLabel<
 }
 
 // ==================== Generate Preview Image ====================
-export async function createPreviewImages(options: DatasetOptions) {
-  const { dataset_dir, task, metadata } = options;
-  const group_types = ["train", "test", "val"] satisfies Array<
-    keyof BoundingBoxGroups
-  >;
-  for (const group_type of group_types) {
-    // const preview_file_dir = join(dataset_dir, group_type, "previews");
-    // await mkdir(preview_file_dir, { recursive: true });
-    const bounding_box_dict = options.bounding_box_groups[group_type];
-    await createPreviewImagesForOneGroup(task, {
-      dataset_dir,
-      group_type,
-      bounding_box_dict,
-      metadata,
-    });
-  }
-  console.log("Finish creating preview images");
-}
+// export async function createPreviewImages(options: DatasetOptions) {
+//   const { dataset_dir, task, metadata } = options;
+//   const group_types = ["train", "test", "val"] satisfies Array<
+//     keyof BoundingBoxGroups
+//   >;
+//   for (const group_type of group_types) {
+//     // const preview_file_dir = join(dataset_dir, group_type, "previews");
+//     // await mkdir(preview_file_dir, { recursive: true });
+//     const bounding_box_dict = options.bounding_box_groups[group_type];
+//     await createPreviewImagesForOneGroup(task, {
+//       dataset_dir,
+//       group_type,
+//       bounding_box_dict,
+//       metadata,
+//     });
+//   }
+//   console.log("Finish creating preview images");
+// }
 
-export async function createPreviewImagesForOneGroup<
-  T extends DetectYamlOptions | PoseYamlOptions
->(
-  task: "detect" | "pose",
-  options: {
-    dataset_dir: string;
-    group_type: string;
-    bounding_box_dict: ImageLabelDict<BoundingBox | BoundingBoxWithKeypoints>;
-    metadata: T;
-  }
-): Promise<void> {
-  const { dataset_dir, group_type, bounding_box_dict, metadata } = options;
-  const preview_dir_path = join(dataset_dir, group_type, "previews");
-  await mkdir(preview_dir_path, { recursive: true });
-  for (const image_path in bounding_box_dict) {
-    const boxes = bounding_box_dict[image_path];
-    const image_full_path = join(dataset_dir, group_type, "images", image_path);
-    await createOnePreviewImage(task, {
-      image_full_path,
-      preview_dir_path,
-      boxes,
-      metadata,
-    });
-  }
+// export async function createPreviewImagesForOneGroup<
+//   T extends DetectYamlOptions | PoseYamlOptions
+// >(
+//   task: "detect" | "pose",
+//   options: {
+//     dataset_dir: string;
+//     group_type: string;
+//     bounding_box_dict: ImageLabelDict<BoundingBox | BoundingBoxWithKeypoints>;
+//     metadata: T;
+//   }
+// ): Promise<void> {
+//   const { dataset_dir, group_type, bounding_box_dict, metadata } = options;
+//   const preview_dir_path = join(dataset_dir, group_type, "previews");
+//   await mkdir(preview_dir_path, { recursive: true });
+//   for (const image_path in bounding_box_dict) {
+//     const boxes = bounding_box_dict[image_path];
+//     const image_full_path = join(dataset_dir, group_type, "images", image_path);
+//     await createOnePreviewImage(task, {
+//       image_full_path,
+//       preview_dir_path,
+//       boxes,
+//       metadata,
+//     });
+//   }
 
-  console.log(`Finish creating preview images for group type: ${group_type}`);
-}
+//   console.log(`Finish creating preview images for group type: ${group_type}`);
+// }
 
-export async function createOnePreviewImage<
-  T extends DetectYamlOptions | PoseYamlOptions
->(
-  task: "detect" | "pose",
-  options: {
-    image_full_path: string; // where to get image
-    preview_dir_path: string; // output dir path
-    metadata: T;
-    boxes: (BoundingBox | BoundingBoxWithKeypoints)[];
-  }
-): Promise<void> {
-  const { image_full_path, preview_dir_path, boxes, metadata } = options;
-  const canvas = await drawLabel(task, {
-    image: image_full_path,
-    metadata,
-    boxes,
-  });
+// export async function createOnePreviewImage<
+//   T extends DetectYamlOptions | PoseYamlOptions
+// >(
+//   task: "detect" | "pose",
+//   options: {
+//     image_full_path: string; // where to get image
+//     preview_dir_path: string; // output dir path
+//     metadata: T;
+//     boxes: (BoundingBox | BoundingBoxWithKeypoints)[];
+//   }
+// ): Promise<void> {
+//   const { image_full_path, preview_dir_path, boxes, metadata } = options;
+//   const canvas = await drawLabel(task, {
+//     image: image_full_path,
+//     metadata,
+//     boxes,
+//   });
 
-  const image_name = basename(image_full_path);
-  const preview_path = join(preview_dir_path, image_name);
-  const base64 = dataURLToBase64(canvas.toDataURL());
-  await writeFile(preview_path, base64, "base64");
-}
+//   const image_name = basename(image_full_path);
+//   const preview_path = join(preview_dir_path, image_name);
+//   const base64 = dataURLToBase64(canvas.toDataURL());
+//   await writeFile(preview_path, base64, "base64");
+// }
 
 // ==================== File Utilities ====================
 export async function saveYAMLFile(

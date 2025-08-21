@@ -1,27 +1,16 @@
 import { join, dirname, basename, extname } from "path";
 import { copyFile, readFile, writeFile, appendFile, stat } from "fs/promises";
-import { existsSync } from "fs";
-
 import {
   cachedCopyFiles,
   cachedMkdir,
-  ExportClassifyDatasetOptions,
 } from "./fs";
-import { group_types as groupTypes, GroupType } from "./group";
+import { group_types as groupTypes, GroupType, isGroupKey } from "./group";
 import {
   ExportDatasetOptions,
   BoxAnnotation,
   KeypointsAnnotation,
-  Category,
 } from "./co-r";
 import { dispatchGroup } from "./split";
-import { toClassifyDataYamlString, toDataYamlString } from "./yaml";
-import { toDetectLabelString, toPoseLabelString } from "./label";
-import {
-  toYoloBoundingBoxLabelString,
-  toYoloBoundingBoxWithKeypointsLabelString,
-} from "./label-r";
-import { group } from "console";
 
 type Sample = {
   imageId: number;
@@ -496,8 +485,6 @@ export async function exportCocoDataset(args: ExportDatasetOptions) {
     groupRatio,
   } = args;
   const { categories, images, metadata, task } = dataset;
-  const isGroupKey = (key: string): key is GroupType =>
-    key === "train" || key === "test" || key === "val";
 
   validatePaths({importImageDirs, importMetadataPaths, exportImageDirs, exportMetadataPaths, groupRatio, dispatchGroup: !!customDispatchGroup});
 

@@ -1,5 +1,6 @@
 import { importDataset } from "./co-r";
 import { exportCocoDataset } from "./export";
+import { createPreviewImages } from "./preview";
 
 async function test() {
   const task = "pose";
@@ -43,6 +44,12 @@ async function test() {
     imageDirs,
     // getCategoryId,
     // getImageId,
+  });
+
+  await createPreviewImages({
+    importDirs: imageDirs,
+    images: dataset.images,
+    categories: dataset.categories,
   });
 
   await exportCocoDataset({
