@@ -15,6 +15,7 @@
   "type": "commonjs",
   "devDependencies": {
     "@types/node": "^24.1.0",
+    "@types/yazl": "^3.3.0",
     "@types/xml-parser": "^1.2.33",
     "rimraf": "^6.0.1",
     "ts-node": "^10.9.2",
@@ -27,8 +28,7 @@
   ],
   "dependencies": {
     "@beenotung/tslib": "^24.12.0",
-    "canvas": "^3.1.2",
-    "xml-parser": "^1.2.1"
+    "canvas": "^3.1.2"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
